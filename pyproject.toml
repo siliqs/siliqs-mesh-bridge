@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "siliqs-mesh-bridge"
+version = "0.1.0"
+description = "Host-side Meshtastic bridge — a transparent serial pipe (and more) over a LoRa mesh"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Siliqs / Guinea Technology" }]
+# meshtastic pulls in pypubsub and pyserial; bleak (for --iface ble) comes with it too.
+dependencies = ["meshtastic>=2.6"]
+keywords = ["meshtastic", "lora", "serial", "bridge", "rs485", "mqtt", "siliqs"]
+classifiers = [
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Programming Language :: Python :: 3",
+  "Topic :: Communications",
+]
+
+[project.optional-dependencies]
+mqtt = ["paho-mqtt>=2"]   # only the `--handler mqtt` gateway needs this
+
+[project.urls]
+Homepage = "https://github.com/livinghuang/siliqs-mesh-bridge"
+
+[project.scripts]
+siliqs-mesh-bridge = "siliqs_mesh_bridge:main"
+
+[tool.setuptools]
+py-modules = ["siliqs_mesh_bridge"]

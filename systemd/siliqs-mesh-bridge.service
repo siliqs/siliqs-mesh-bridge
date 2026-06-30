@@ -1,0 +1,22 @@
+# Headless auto-start for a Linux/RPi host. Install:
+#   sudo cp siliqs-mesh-bridge.service /etc/systemd/system/
+#   sudoedit /etc/systemd/system/siliqs-mesh-bridge.service   # set --port and --peer
+#   sudo systemctl enable --now siliqs-mesh-bridge
+[Unit]
+Description=Siliqs Meshtastic bridge (serial pipe over LoRa)
+After=network.target
+
+[Service]
+# EDIT: --port (your node's serial), --peer (the OTHER node), --link (the serial port
+# your software opens). For BLE: --iface ble --ble '<name>'.
+ExecStart=/usr/local/bin/siliqs-mesh-bridge --iface usb --port /dev/ttyACM0 \
+  --handler serial --peer '!7d51bdc4' --link /run/meshtty --mtu 50
+Restart=on-failure
+RestartSec=3
+# DynamicUser is simplest; if your software needs the PTY, run as a real user in
+# the `dialout` group and point --link somewhere it can read.
+User=nobody
+SupplementaryGroups=dialout
+
+[Install]
+WantedBy=multi-user.target
