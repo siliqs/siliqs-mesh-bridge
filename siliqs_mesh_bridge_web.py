@@ -148,6 +148,7 @@ class Runner:
         self.log.append("— bridge process exited —")
 
     def stop(self):
+        console.close()                     # drop any web-terminal attach to the PTY
         with self.lock:
             if not self.running():
                 return False, "not running"
@@ -190,6 +191,125 @@ class Runner:
 
 
 runner = Runner()
+
+
+class TtyConsole:
+    """Browser terminal for a running serial-tunnel handler.
+
+    A serial handler exposes a PTY slave at cfg['link']; this opens that slave on a
+    *separate* fd so the browser can read what the peer sent and write lines back —
+    i.e. screen/miniterm, but in the web UI. Only meaningful while a serial handler
+    runs; the mqtt gateway has no PTY. If a CLI screen/miniterm is also attached to
+    the same link they share (race) the byte stream — use one at a time."""
+    MAXBUF = 64 * 1024
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.ser = None
+        self.path = None
+        self.buf = bytearray()
+        self.base = 0          # absolute stream offset of buf[0]
+
+    def ensure(self, path):
+        with self.lock:
+            if self.ser is not None and self.path == path:
+                return True
+            self._close_locked()
+            if not path:
+                return False
+            try:
+                import serial
+                self.ser = serial.Serial(path, 115200, timeout=0.3)
+            except Exception:
+                self.ser = None
+                self.path = None
+                return False
+            self.path = path
+            self.base = 0
+            self.buf = bytearray()
+            ser = self.ser
+            threading.Thread(target=self._read_loop, args=(ser,), daemon=True).start()
+            return True
+
+    def _read_loop(self, ser):
+        while True:
+            with self.lock:
+                if self.ser is not ser:
+                    return
+            try:
+                d = ser.read(256)
+            except Exception:
+                return
+            if d:
+                with self.lock:
+                    if self.ser is not ser:
+                        return
+                    self.buf += d
+                    if len(self.buf) > self.MAXBUF:
+                        drop = len(self.buf) - self.MAXBUF
+                        del self.buf[:drop]
+                        self.base += drop
+
+    def send(self, data):
+        with self.lock:
+            if self.ser is None:
+                return False
+            try:
+                self.ser.write(data)
+                return True
+            except Exception:
+                return False
+
+    def read(self, off):
+        with self.lock:
+            total = self.base + len(self.buf)
+            if off < self.base:
+                off = self.base
+            return bytes(self.buf[off - self.base:]), total
+
+    def _close_locked(self):
+        if self.ser is not None:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+        self.ser = None
+        self.path = None
+
+    def close(self):
+        with self.lock:
+            self._close_locked()
+
+
+console = TtyConsole()
+
+
+def _serial_link():
+    """The PTY link path iff a serial tunnel is currently running, else None."""
+    c = runner.cfg or {}
+    if runner.running() and c.get("handler") == "serial":
+        return c.get("link")
+    return None
+
+
+def _tty_read(path):
+    off = 0
+    if "?" in path:
+        for kv in path.split("?", 1)[1].split("&"):
+            if kv.startswith("off="):
+                try:
+                    off = int(kv[4:])
+                except ValueError:
+                    off = 0
+    link = _serial_link()
+    if not link:
+        return {"attached": False, "off": 0, "data": "",
+                "note": "start a serial tunnel (handler = serial, with a link path) to use the terminal"}
+    if not console.ensure(link):
+        return {"attached": False, "off": 0, "data": "", "note": f"opening {link}…"}
+    chunk, total = console.read(off)
+    return {"attached": True, "off": total, "data": chunk.decode("utf-8", "replace"),
+            "note": f"attached to {link}"}
 
 
 def list_ports():
@@ -248,6 +368,8 @@ class Handler(BaseHTTPRequestHandler):
                              "cfg": runner.cfg, "log": list(runner.log)})
         elif self.path == "/api/telemetry":
             self._send(200, telemetry.snapshot())
+        elif self.path.startswith("/api/tty/read"):
+            self._send(200, _tty_read(self.path))
         else:
             self._send(404, {"error": "not found"})
 
@@ -267,6 +389,15 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/stop":
             ok, msg = runner.stop()
             self._send(200, {"ok": ok, "msg": msg})
+        elif self.path == "/api/tty/send":
+            link = _serial_link()
+            ok = False
+            if link and console.ensure(link):
+                data = cfg.get("text", "").encode("utf-8", "replace")
+                if data and not data.endswith((b"\n", b"\r")):
+                    data += b"\n"          # line-mode handler flushes on a terminator
+                ok = console.send(data)
+            self._send(200, {"ok": ok})
         else:
             self._send(404, {"error": "not found"})
 
@@ -347,6 +478,15 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   <pre id="log">—</pre>
  </div>
 
+ <div class="card hide" id="ttyCard">
+  <h2>Terminal <span class="note" id="ttyNote">serial tunnel — type a line, Enter sends it over the mesh</span></h2>
+  <pre id="ttyOut" style="height:240px;overflow:auto;white-space:pre-wrap;word-break:break-all">—</pre>
+  <div class="row" style="align-items:center;margin:8px 0 0">
+   <input id="ttyIn" style="flex:1" placeholder="type a line, press Enter…" disabled autocomplete="off">
+   <button id="ttySend" disabled>Send</button>
+   <button id="ttyClear" type="button">Clear</button></div>
+ </div>
+
  <div class="card" id="telCard">
   <h2>Telemetry <span class="note" id="telBroker"></span></h2>
   <table><thead><tr><th>Node</th><th>Last heard</th><th>Bytes</th><th>Payload (raw hex)</th></tr></thead>
@@ -365,6 +505,8 @@ function syncUI(){
  $('bleRow').classList.toggle('hide', ifaceVal()!=='ble');
  $('serialCfg').classList.toggle('hide', handlerVal()!=='serial');
  $('mqttCfg').classList.toggle('hide', handlerVal()!=='mqtt');
+ $('ttyCard').classList.toggle('hide', handlerVal()!=='serial');
+ $('telCard').classList.toggle('hide', handlerVal()!=='mqtt');
 }
 $('iface').onchange=syncUI; $('handler').onchange=syncUI;
 async function loadPorts(){
@@ -420,7 +562,31 @@ async function pollTel(){
   $('telEvents').innerHTML=E.map(e=>`<tr><td class="note" style="white-space:nowrap">${new Date(e.t*1000).toLocaleTimeString()}</td><td class="node">${e.node}</td><td class="mono">${fhex(e.hex)}</td></tr>`).join('');
  }catch(e){}
 }
-syncUI(); loadPorts(); poll(); setInterval(poll,1000); pollTel(); setInterval(pollTel,2000);
+let ttyOff=0;
+async function pollTty(){
+ if(handlerVal()!=='serial') return;
+ try{const d=await (await fetch('/api/tty/read?off='+ttyOff)).json();
+  $('ttyNote').textContent=d.note||'';
+  $('ttyIn').disabled=!d.attached; $('ttySend').disabled=!d.attached;
+  if(d.attached){
+   if(d.data){const o=$('ttyOut'); if(o.textContent==='—')o.textContent='';
+    const atBottom=o.scrollHeight-o.scrollTop-o.clientHeight<24; o.textContent+=d.data;
+    if(atBottom)o.scrollTop=o.scrollHeight;}
+   if(typeof d.off==='number') ttyOff=d.off;
+  }
+ }catch(e){}
+}
+async function ttySend(){
+ const t=$('ttyIn').value; if(!t)return;
+ const o=$('ttyOut'); if(o.textContent==='—')o.textContent='';
+ o.textContent+='» '+t+'\n'; o.scrollTop=o.scrollHeight;   // local echo (handler doesn't echo back)
+ $('ttyIn').value='';
+ try{await fetch('/api/tty/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t})});}catch(e){}
+}
+$('ttySend').onclick=ttySend;
+$('ttyIn').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();ttySend();}});
+$('ttyClear').onclick=()=>{$('ttyOut').textContent='—';};
+syncUI(); loadPorts(); poll(); setInterval(poll,1000); pollTel(); setInterval(pollTel,2000); pollTty(); setInterval(pollTty,1000);
 </script></body></html>"""
 
 
