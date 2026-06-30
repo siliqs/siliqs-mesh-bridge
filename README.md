@@ -72,8 +72,13 @@ local server (stdlib only) that spawns the bridge for you.
 ```sh
 siliqs-mesh-bridge-web        # then open http://127.0.0.1:8765
 ```
-Pick the transport + handler in the form, click **Start**, and open the printed
-`/dev/pts/…` (or your `link` path) with your serial software. Binds 127.0.0.1 only.
+Pick the transport + handler in the form (USB/BLE; serial-pipe peer **or** MQTT broker
+host/port), click **Start**, watch the log, and — for an MQTT gateway — see **live
+telemetry** (latest-by-node + event stream) right on the page. It binds 127.0.0.1 by
+default; use `--host 0.0.0.0` to reach it on the LAN.
+
+For an appliance, set `SMB_CONFIG_FILE=/data/config.json`: the last applied config is
+saved there and **auto-started on boot** (survives reboot, no clicking).
 
 ### Framing (it does **not** stream byte-by-byte)
 

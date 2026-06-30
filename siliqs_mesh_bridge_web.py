@@ -12,16 +12,97 @@ CLI as a subprocess and streams its output. Binds 127.0.0.1 by default.
   siliqs-mesh-bridge-web            # then open http://127.0.0.1:8765
 """
 import argparse
+import base64
 import json
+import os
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import siliqs_mesh_bridge   # reuse the verified CLI (we spawn this file)
 
 BRIDGE = siliqs_mesh_bridge.__file__
+# If set, the last applied config is saved here and auto-started on launch — so a
+# deployed appliance survives a reboot without anyone clicking Start.
+CONFIG_FILE = os.environ.get("SMB_CONFIG_FILE")
+
+
+class Telemetry:
+    """Subscribes to the MQTT broker (msh/2/json/#) and keeps a live view: latest
+    frame per node + a rolling event stream. Used by the telemetry panel so the same
+    web UI shows data, not just controls. paho-mqtt is imported lazily."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.latest = {}
+        self.events = deque(maxlen=200)
+        self.cli = None
+        self.broker = None
+
+    def watch(self, broker, port):
+        try:
+            import paho.mqtt.client as mqtt
+        except ImportError:
+            return
+        with self.lock:
+            if self.cli:
+                try:
+                    self.cli.loop_stop(); self.cli.disconnect()
+                except Exception:
+                    pass
+                self.cli = None
+            c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+            c.on_message = self._on_msg
+            try:
+                c.connect(broker, int(port), 60)
+                c.subscribe("msh/2/json/#")
+                c.loop_start()
+                self.cli = c
+                self.broker = f"{broker}:{port}"
+            except Exception:
+                self.cli = None
+
+    def _on_msg(self, client, userdata, msg):  # noqa: ARG002
+        try:
+            d = json.loads(msg.payload)
+            sender = d.get("sender") or msg.topic.split("/")[-1]
+            raw = base64.b64decode((d.get("payload") or {}).get("raw", ""))
+            ev = {"t": time.time(), "node": sender, "len": len(raw), "hex": raw.hex()}
+            with self.lock:
+                self.latest[sender] = ev
+                self.events.append(ev)
+        except Exception:
+            pass
+
+    def snapshot(self):
+        with self.lock:
+            return {"broker": self.broker, "latest": list(self.latest.values()),
+                    "events": list(self.events)[-120:]}
+
+
+telemetry = Telemetry()
+
+
+def _save_cfg(cfg):
+    if CONFIG_FILE:
+        try:
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(cfg, f)
+        except OSError:
+            pass
+
+
+def _load_cfg():
+    if CONFIG_FILE:
+        try:
+            with open(CONFIG_FILE) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+    return None
 
 
 class Runner:
@@ -30,6 +111,7 @@ class Runner:
     def __init__(self):
         self.proc = None
         self.argv = None
+        self.cfg = None
         self.log = deque(maxlen=400)
         self.lock = threading.Lock()
 
@@ -42,13 +124,17 @@ class Runner:
                 return False, "already running — stop it first"
             argv = self._build_argv(cfg)          # raises ValueError on bad config
             self.argv = argv
+            self.cfg = cfg
             self.log.clear()
             self.log.append("$ siliqs-mesh-bridge " + " ".join(argv))
             self.proc = subprocess.Popen(
                 [sys.executable, "-u", BRIDGE, *argv],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             threading.Thread(target=self._pump, daemon=True).start()
-            return True, "started"
+        _save_cfg(cfg)                              # persist for reboot auto-start
+        if cfg.get("handler") == "mqtt" and cfg.get("broker"):
+            telemetry.watch(cfg["broker"], cfg.get("broker_port", 1883))  # live view
+        return True, "started"
 
     def _pump(self):
         try:
@@ -127,7 +213,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ports": list_ports()})
         elif self.path == "/api/state":
             self._send(200, {"running": runner.running(), "argv": runner.argv,
-                             "log": list(runner.log)})
+                             "cfg": runner.cfg, "log": list(runner.log)})
+        elif self.path == "/api/telemetry":
+            self._send(200, telemetry.snapshot())
         else:
             self._send(404, {"error": "not found"})
 
@@ -172,6 +260,8 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  button.primary{background:var(--ac);color:#06210f;border-color:var(--ac);font-weight:600} button.danger{color:var(--dn);border-color:#5a2b2b}
  button:disabled{opacity:.45;cursor:not-allowed} .note{font-size:12px;color:var(--mut)}
  pre{background:#0e0f13;border:1px solid var(--bd);border-radius:8px;padding:12px;height:280px;overflow:auto;font:12px ui-monospace,monospace;white-space:pre-wrap;color:#cfd3da}
+ table{width:100%;border-collapse:collapse;font-size:13px} th,td{text-align:left;padding:6px 9px;border-bottom:1px solid var(--bd);vertical-align:top} th{color:var(--mut);font-weight:500;font-size:11px}
+ .mono{font-family:ui-monospace,monospace;font-size:12px;word-break:break-all} .node{color:var(--ac);font-family:ui-monospace,monospace}
  .hide{display:none}
 </style></head><body>
 <header><span id="dot" class="dot"></span><b>siliqs-mesh-bridge</b><span class="note">control panel</span>
@@ -223,6 +313,14 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   <h2 style="margin-top:16px">Log</h2>
   <pre id="log">—</pre>
  </div>
+
+ <div class="card" id="telCard">
+  <h2>Telemetry <span class="note" id="telBroker"></span></h2>
+  <table><thead><tr><th>Node</th><th>Last heard</th><th>Bytes</th><th>Payload (raw hex)</th></tr></thead>
+   <tbody id="telLatest"><tr><td colspan="4" class="note">no telemetry yet — start an MQTT gateway</td></tr></tbody></table>
+  <h2 style="margin-top:14px">Event stream <span class="note">newest first</span></h2>
+  <div style="max-height:240px;overflow:auto"><table><tbody id="telEvents"></tbody></table></div>
+ </div>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -256,8 +354,20 @@ $('start').onclick=async()=>{
  const d=await r.json(); $('msg').textContent=d.msg; $('msg').style.color=d.ok?'var(--mut)':'var(--dn)';
 };
 $('stop').onclick=async()=>{const r=await fetch('/api/stop',{method:'POST'});const d=await r.json();$('msg').textContent=d.msg;};
+let formSeeded=false;
+function seedForm(c){           // populate the form from the saved/running config (once)
+ if(!c||formSeeded) return; formSeeded=true;
+ const set=(id,v)=>{if(v!=null&&v!=='')$(id).value=v};
+ if(c.iface){const el=document.querySelector(`input[name=iface][value="${c.iface}"]`);if(el)el.checked=true}
+ if(c.handler){const el=document.querySelector(`input[name=handler][value="${c.handler}"]`);if(el)el.checked=true}
+ set('ble',c.ble);set('peer',c.peer);set('link',c.link);set('mode',c.mode);set('mtu',c.mtu);
+ set('broker',c.broker);set('brokerPort',c.broker_port);set('channel',c.channel);
+ syncUI();
+ if(c.port){const o=[...$('port').options].find(o=>o.value===c.port);if(o)$('port').value=c.port}
+}
 async function poll(){
  try{const r=await fetch('/api/state');const d=await r.json();
+  seedForm(d.cfg);
   $('dot').classList.toggle('on',d.running);
   $('status').textContent=d.running?'running':'stopped';
   $('start').disabled=d.running; $('stop').disabled=!d.running;
@@ -266,7 +376,18 @@ async function poll(){
   if(atBottom) log.scrollTop=log.scrollHeight;
  }catch(e){}
 }
-syncUI(); loadPorts(); poll(); setInterval(poll,1000);
+const fago=t=>{const s=Math.max(0,Math.round(Date.now()/1000-t));return s<60?s+'s ago':Math.round(s/60)+'m ago'};
+const fhex=h=>h.replace(/(..)/g,'$1 ').trim();
+async function pollTel(){
+ try{const d=await (await fetch('/api/telemetry')).json();
+  $('telBroker').textContent=d.broker?('· '+d.broker):'';
+  const L=(d.latest||[]).sort((a,b)=>b.t-a.t);
+  $('telLatest').innerHTML=L.length?L.map(e=>`<tr><td class="node">${e.node}</td><td class="note">${fago(e.t)}</td><td>${e.len}</td><td class="mono">${fhex(e.hex)}</td></tr>`).join(''):'<tr><td colspan="4" class="note">no telemetry yet — start an MQTT gateway</td></tr>';
+  const E=(d.events||[]).slice().reverse();
+  $('telEvents').innerHTML=E.map(e=>`<tr><td class="note" style="white-space:nowrap">${new Date(e.t*1000).toLocaleTimeString()}</td><td class="node">${e.node}</td><td class="mono">${fhex(e.hex)}</td></tr>`).join('');
+ }catch(e){}
+}
+syncUI(); loadPorts(); poll(); setInterval(poll,1000); pollTel(); setInterval(pollTel,2000);
 </script></body></html>"""
 
 
@@ -277,6 +398,13 @@ def main():
     args = ap.parse_args()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"siliqs-mesh-bridge control panel → http://{args.host}:{args.port}  (Ctrl-C to stop)")
+    saved = _load_cfg()           # appliance: auto-start the last applied config on boot
+    if saved:
+        try:
+            ok, msg = runner.start(saved)
+            print(f"auto-start from {CONFIG_FILE}: {msg}")
+        except ValueError as e:
+            print(f"auto-start skipped (bad saved config): {e}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
