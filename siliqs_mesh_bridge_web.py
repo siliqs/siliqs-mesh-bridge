@@ -190,11 +190,40 @@ runner = Runner()
 
 
 def list_ports():
+    """Best-effort serial port list.
+
+    pyserial's comports() enumerates via /sys/class/tty, which is NOT populated
+    for a Docker `--device`-mapped node — so inside a container the dropdown comes
+    up empty even though the device works. To avoid that confusion we also glob
+    /dev for the usual serial nodes and fold in whatever port is configured/running.
+    """
+    seen, out = set(), []
+
+    def add(dev, desc=""):
+        if dev and dev not in seen:
+            seen.add(dev)
+            out.append({"device": dev, "desc": desc})
+
     try:
         from serial.tools import list_ports as lp
-        return [{"device": p.device, "desc": p.description or ""} for p in lp.comports()]
+        for p in lp.comports():
+            add(p.device, p.description or "")
     except Exception:
-        return []
+        pass
+    # raw /dev scan — catches container --device maps and udev symlinks pyserial misses
+    import glob
+    for pat in ("/dev/ttyACM*", "/dev/ttyUSB*", "/dev/cu.*", "/dev/serial/by-id/*",
+                "/dev/sqc485i-*", "/dev/*-meshtastic"):
+        for dev in sorted(glob.glob(pat)):
+            add(dev, "device node")
+    # always surface the configured/running port so it can be re-selected
+    try:
+        cfg = _load_cfg()
+        if cfg.get("port"):
+            add(cfg["port"], "configured")
+    except Exception:
+        pass
+    return out
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -273,8 +302,9 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
    <label><input type="radio" name="iface" value="usb" checked> USB</label>
    <label><input type="radio" name="iface" value="ble"> BLE</label></div>
   <div class="row" id="usbRow" style="margin-top:12px">
-   <div class="field" style="flex:2"><label>Serial port</label><select id="port"></select></div>
+   <div class="field" style="flex:2"><label>Serial port</label><input id="port" list="portlist" placeholder="/dev/ttyACM0 — or type a path"><datalist id="portlist"></datalist></div>
    <div class="field" style="flex:0"><label>&nbsp;</label><button id="refresh" type="button">↻ refresh</button></div></div>
+  <p class="note" id="portHint" style="margin:2px 0 0">Pick from the list, or <b>type the device path</b> — in a container the auto-list is often empty even when the device works (e.g. <code>/dev/sqc485i-meshtastic</code>).</p>
   <div class="row hide" id="bleRow" style="margin-top:12px">
    <div class="field"><label>BLE device name or address</label><input id="ble" placeholder="e.g. SQC485I"></div></div>
  </div>
@@ -336,9 +366,9 @@ function syncUI(){
 $('iface').onchange=syncUI; $('handler').onchange=syncUI;
 async function loadPorts(){
  const r=await fetch('/api/ports'); const d=await r.json();
- const sel=$('port'); const cur=sel.value;
- sel.innerHTML=d.ports.map(p=>`<option value="${p.device}">${p.device} — ${p.desc}</option>`).join('')||'<option value="">(no serial ports)</option>';
- if([...sel.options].some(o=>o.value===cur)) sel.value=cur;
+ const dl=$('portlist');                       // datalist suggestions; the input keeps its typed value
+ dl.innerHTML=d.ports.map(p=>`<option value="${p.device}">${p.desc}</option>`).join('');
+ if(!$('port').value && d.ports.length) $('port').value=d.ports[0].device;
 }
 $('refresh').onclick=loadPorts;
 function cfg(){
@@ -363,7 +393,7 @@ function seedForm(c){           // populate the form from the saved/running conf
  set('ble',c.ble);set('peer',c.peer);set('link',c.link);set('mode',c.mode);set('mtu',c.mtu);
  set('broker',c.broker);set('brokerPort',c.broker_port);set('channel',c.channel);
  syncUI();
- if(c.port){const o=[...$('port').options].find(o=>o.value===c.port);if(o)$('port').value=c.port}
+ if(c.port)$('port').value=c.port;   // free-text input now — just restore the path
 }
 async function poll(){
  try{const r=await fetch('/api/state');const d=await r.json();
