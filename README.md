@@ -59,6 +59,10 @@ siliqs-mesh-bridge --iface usb --port /dev/ttyACM0     --handler mqtt --broker <
 ```
 No WiFi/MQTT on the node — the host does the MQTT step (the node stays pure-mesh).
 
+Add `--web-port 9090` to also serve a **live telemetry view** (latest-by-node +
+event stream of the raw PortNum-256 frames) at `http://<host>:9090` — a lightweight
+replacement for a dashboard.
+
 ## No command line — the control panel
 
 A small **localhost web UI** to start/stop the bridge and watch its log, for users

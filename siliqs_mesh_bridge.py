@@ -50,6 +50,7 @@ import select
 import sys
 import time
 import tty
+from collections import deque
 
 from pubsub import pub
 
@@ -233,21 +234,33 @@ class MqttHandler:
     the nafco-compatible JSON the cloud decoder consumes — so the existing MQTT →
     decoder → InfluxDB pipeline is reusable unchanged. Run on a CLIENT_MUTE gateway."""
 
-    def __init__(self, iface, broker, broker_port=1883, channel="LongFast", verbose=False):
+    def __init__(self, iface, broker, broker_port=1883, channel="LongFast", verbose=False,
+                 web_port=None):
+        import threading
         import paho.mqtt.client as mqtt   # lazy: only the mqtt handler needs paho
         self.iface = iface
         self.channel = channel
         self.verbose = verbose
         self.n = 0
         self.broker = f"{broker}:{broker_port}"
+        self.web_port = web_port
+        # In-memory store for the optional telemetry view: latest per node + a stream.
+        self.lock = threading.Lock()
+        self.latest = {}
+        self.events = deque(maxlen=200)
         self.cli = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.cli.connect(broker, broker_port, 60)
         self.cli.loop_start()
         pub.subscribe(self._on_receive, "meshtastic.receive.data")
+        if web_port:
+            self._start_web(web_port)
 
     def banner(self):
         print(f"mqtt gateway ready:  PortNum {MODBUS_PORTNUM} -> {self.broker}")
-        print(f"  topic: msh/2/json/{self.channel}/<node>   Ctrl-C to stop.")
+        print(f"  topic: msh/2/json/{self.channel}/<node>")
+        if self.web_port:
+            print(f"  telemetry view: http://0.0.0.0:{self.web_port}")
+        print("  Ctrl-C to stop.")
 
     def _on_receive(self, packet, interface=None):  # noqa: ARG002
         dec = packet.get("decoded") or {}
@@ -270,9 +283,44 @@ class MqttHandler:
         topic = f"msh/2/json/{self.channel}/{sender}"
         self.cli.publish(topic, json.dumps(envelope))
         self.n += 1
+        # Record for the optional telemetry view (latest per node + a rolling stream).
+        ev = {"t": time.time(), "node": sender, "len": len(payload), "hex": payload.hex()}
+        with self.lock:
+            self.latest[sender] = ev
+            self.events.append(ev)
         if self.verbose:
             print(f"  [mqtt {self.n}] {sender} -> {topic}  {len(payload)}B {payload.hex()}",
                   file=sys.stderr)
+
+    def _start_web(self, port):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        store = self
+
+        class WebH(BaseHTTPRequestHandler):
+            def _send(self, code, body, ctype):
+                b = body if isinstance(body, (bytes, bytearray)) else json.dumps(body).encode()
+                self.send_response(code); self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(b))); self.end_headers()
+                self.wfile.write(b)
+
+            def do_GET(self):
+                if self.path == "/" or self.path.startswith("/?"):
+                    self._send(200, TELEM_PAGE.encode(), "text/html; charset=utf-8")
+                elif self.path == "/api/telemetry":
+                    with store.lock:
+                        data = {"count": store.n, "broker": store.broker,
+                                "latest": list(store.latest.values()),
+                                "events": list(store.events)[-120:]}
+                    self._send(200, data, "application/json")
+                else:
+                    self._send(404, {"error": "not found"}, "application/json")
+
+            def log_message(self, *a):
+                pass
+
+        srv = ThreadingHTTPServer(("0.0.0.0", port), WebH)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
 
     def run(self):
         self.banner()
@@ -282,6 +330,45 @@ class MqttHandler:
         finally:
             self.cli.loop_stop()
             self.cli.disconnect()
+
+
+TELEM_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>siliqs-mesh-bridge · telemetry</title><style>
+ :root{--bg:#14151a;--panel:#1d1f27;--p2:#23262f;--bd:#2e3140;--tx:#e7e9ee;--mut:#9aa0ad;--ac:#67ea94}
+ *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,-apple-system,sans-serif}
+ header{display:flex;align-items:center;gap:12px;padding:14px 20px;background:var(--panel);border-bottom:1px solid var(--bd)}
+ header b{font-size:16px}.dot{width:10px;height:10px;border-radius:50%;background:var(--ac);box-shadow:0 0 8px var(--ac)}
+ main{max-width:920px;margin:0 auto;padding:20px}.card{background:var(--panel);border:1px solid var(--bd);border-radius:12px;padding:16px 18px;margin-bottom:18px}
+ h2{margin:0 0 10px;font-size:14px}.note{font-size:12px;color:var(--mut)}
+ table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--bd);vertical-align:top}
+ th{color:var(--mut);font-weight:500;font-size:11px}.mono{font-family:ui-monospace,monospace;font-size:12px;word-break:break-all}
+ .node{color:var(--ac);font-family:ui-monospace,monospace}.evs{max-height:340px;overflow:auto}
+</style></head><body>
+<header><span class="dot"></span><b>siliqs-mesh-bridge</b><span class="note">telemetry</span>
+ <span style="flex:1"></span><span id="meta" class="note"></span></header>
+<main>
+ <div class="card"><h2>Latest by node</h2>
+  <table><thead><tr><th>Node</th><th>Last heard</th><th>Bytes</th><th>Payload (raw hex)</th></tr></thead>
+  <tbody id="latest"><tr><td colspan="4" class="note">waiting for telemetry…</td></tr></tbody></table></div>
+ <div class="card"><h2>Event stream <span class="note">newest first</span></h2>
+  <div class="evs"><table><tbody id="events"></tbody></table></div></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const ago=t=>{const s=Math.max(0,Math.round(Date.now()/1000-t));return s<60?s+'s ago':Math.round(s/60)+'m ago'};
+const hx=h=>h.replace(/(..)/g,'$1 ').trim();
+async function poll(){
+ try{const d=await (await fetch('/api/telemetry')).json();
+  $('meta').textContent=`${d.count} frame(s) · broker ${d.broker}`;
+  const L=d.latest.sort((a,b)=>b.t-a.t);
+  $('latest').innerHTML=L.length?L.map(e=>`<tr><td class="node">${e.node}</td><td class="note">${ago(e.t)}</td><td>${e.len}</td><td class="mono">${hx(e.hex)}</td></tr>`).join(''):'<tr><td colspan="4" class="note">waiting for telemetry…</td></tr>';
+  const E=d.events.slice().reverse();
+  $('events').innerHTML=E.map(e=>`<tr><td class="note" style="white-space:nowrap">${new Date(e.t*1000).toLocaleTimeString()}</td><td class="node">${e.node}</td><td class="mono">${hx(e.hex)}</td></tr>`).join('');
+ }catch(e){}
+}
+poll();setInterval(poll,2000);
+</script></body></html>"""
 
 
 def _num(peer):
@@ -311,6 +398,8 @@ def main():
     ap.add_argument("--broker", default="127.0.0.1", help="mqtt: broker host")
     ap.add_argument("--broker-port", type=int, default=1883, help="mqtt: broker port")
     ap.add_argument("--channel", default="LongFast", help="mqtt: topic channel segment")
+    ap.add_argument("--web-port", type=int, default=None,
+                    help="mqtt: also serve a live telemetry view on this port (e.g. 9090)")
     ap.add_argument("--verbose", action="store_true", help="log every tx/rx for debugging")
     args = ap.parse_args()
 
@@ -324,7 +413,8 @@ def main():
                           mode=args.mode, coalesce_ms=args.coalesce_ms).run()
         elif args.handler == "mqtt":
             MqttHandler(iface, args.broker, broker_port=args.broker_port,
-                        channel=args.channel, verbose=args.verbose).run()
+                        channel=args.channel, verbose=args.verbose,
+                        web_port=args.web_port).run()
     except KeyboardInterrupt:
         print("\nstopping.", file=sys.stderr)
     finally:
