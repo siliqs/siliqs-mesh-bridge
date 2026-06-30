@@ -119,9 +119,12 @@ class Runner:
         return self.proc is not None and self.proc.poll() is None
 
     def start(self, cfg):
+        # Mode switch: only one handler can hold the single USB at a time, so
+        # starting a new config first stops whatever is currently running. This
+        # makes "pick a mode → Start" a one-click switch (no separate Stop).
+        if self.running():
+            self.stop()
         with self.lock:
-            if self.running():
-                return False, "already running — stop it first"
             argv = self._build_argv(cfg)          # raises ValueError on bad config
             self.argv = argv
             self.cfg = cfg
