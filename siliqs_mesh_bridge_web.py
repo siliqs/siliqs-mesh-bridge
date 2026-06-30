@@ -492,7 +492,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 
   <div id="serialCfg" style="margin-top:12px">
    <div class="row">
-    <div class="field"><label>Peer node (the other end)</label><input id="peer" list="peerlist" placeholder="!7d51bdc4 — or scan & pick"><datalist id="peerlist"></datalist></div>
+    <div class="field"><label>Peer node (the other end)</label><input id="peer" placeholder="!7d51bdc4 — or pick below"><select id="peerPick" style="margin-top:6px"><option value="">— scan, then pick a node —</option></select></div>
     <div class="field"><label>Virtual port path (link)</label><input id="link" placeholder="/tmp/meshtty"></div></div>
    <div class="row">
     <div class="field"><label>Framing</label><select id="mode"><option value="line">line (per Enter)</option><option value="stream">stream (binary)</option></select></div>
@@ -636,16 +636,17 @@ async function scanNodes(){
   if(d.error){$('scanNote').textContent=d.error; }
   else{
    const ns=d.nodes||[];
-   $('peerlist').innerHTML=ns.map(n=>{
+   $('peerPick').innerHTML='<option value="">— pick a node —</option>'+ns.map(n=>{
     const nm=[n.short,n.long].filter(Boolean).join(' / ')||n.id;
     const hop=(n.hops==null)?'':` · ${n.hops} hop`;
-    return `<option value="${n.id}">${nm}${hop}</option>`;}).join('');
-   $('scanNote').textContent=ns.length?`found ${ns.length} node(s) — click the Peer field to pick`:'no other nodes heard yet';
+    return `<option value="${n.id}">${nm}${hop} — ${n.id}</option>`;}).join('');
+   $('scanNote').textContent=ns.length?`found ${ns.length} node(s) — pick from the dropdown below the Peer box`:'no other nodes heard yet';
   }
  }catch(e){$('scanNote').textContent='scan failed';}
  b.disabled=false; b.textContent=old;
 }
 $('scanNodes').onclick=scanNodes;
+$('peerPick').onchange=()=>{ if($('peerPick').value) $('peer').value=$('peerPick').value; };
 $('ttySend').onclick=ttySend;
 $('ttyIn').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();ttySend();}});
 $('ttyClear').onclick=()=>{$('ttyOut').textContent='—';};
