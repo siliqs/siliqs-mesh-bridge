@@ -433,6 +433,14 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/stop":
             ok, msg = runner.stop()
             self._send(200, {"ok": ok, "msg": msg})
+        elif self.path == "/api/quit":
+            # Quit the whole app (needed for the windowless macOS .app / packaged builds,
+            # which have no console to Ctrl-C). Reply first, then stop + exit shortly after.
+            self._send(200, {"ok": True, "msg": "quitting"})
+            def _bye():
+                try: runner.stop()
+                finally: os._exit(0)
+            threading.Timer(0.4, _bye).start()
         elif self.path == "/api/nodes":
             nodes, err = scan_nodes(cfg.get("iface", "usb"), cfg.get("port"), cfg.get("ble"))
             self._send(200, {"nodes": nodes or [], "error": err})
@@ -523,7 +531,8 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   <div class="row" style="align-items:center;margin:0">
    <button id="start" class="primary">Start</button>
    <button id="stop" class="danger" disabled>Stop</button>
-   <span id="msg" class="note"></span></div>
+   <span id="msg" class="note"></span>
+   <button id="quit" type="button" style="margin-left:auto" title="Stop the bridge and quit the app">⏻ Quit app</button></div>
   <h2 style="margin-top:16px">Log</h2>
   <pre id="log">—</pre>
  </div>
@@ -579,6 +588,11 @@ $('start').onclick=async()=>{
  const d=await r.json(); $('msg').textContent=d.msg; $('msg').style.color=d.ok?'var(--mut)':'var(--dn)';
 };
 $('stop').onclick=async()=>{const r=await fetch('/api/stop',{method:'POST'});const d=await r.json();$('msg').textContent=d.msg;};
+$('quit').onclick=async()=>{
+ if(!confirm('Stop the bridge and quit the app?'))return;
+ try{await fetch('/api/quit',{method:'POST'});}catch(e){}
+ document.body.innerHTML='<div style="padding:40px;font:16px system-ui">siliqs-mesh-bridge has quit. You can close this tab.</div>';
+};
 let formSeeded=false;
 function seedForm(c){           // populate the form from the saved/running config (once)
  if(!c||formSeeded) return; formSeeded=true;

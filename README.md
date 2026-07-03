@@ -24,12 +24,14 @@ handler (serial tunnel or MQTT gateway) and Start. No install, no command line.
 | OS | File | Run |
 |----|------|-----|
 | **Windows** | `siliqs-mesh-bridge-windows-x86_64.exe` | double-click (SmartScreen: *More info → Run anyway*) |
-| **macOS** | `siliqs-mesh-bridge-macos-arm64` | `chmod +x` then run; first launch: **right-click → Open** (unsigned) |
+| **macOS** | `siliqs-mesh-bridge-macos-arm64.zip` | unzip → double-click **siliqs-mesh-bridge.app**; first launch: **right-click → Open** (unsigned) |
 | **Linux** | `siliqs-mesh-bridge-linux-x86_64` | `chmod +x ./siliqs-mesh-bridge-linux-x86_64 && ./…` |
 
-The builds are unsigned (community app) — the "unknown developer" prompt is expected; the
-right-click/*Run anyway* step is a one-time bypass. Serial devices may need a driver
-(CH340/CP2102) and, on Linux, your user in the `dialout` group; BLE needs host Bluetooth.
+Close the app with the **"⏻ Quit app"** button in the control panel (or, on Windows/Linux,
+close the console window). The builds are unsigned (community app) — the "unknown developer"
+prompt is expected; the right-click/*Run anyway* step is a one-time bypass. Serial devices may
+need a driver (CH340/CP2102) and, on Linux, your user in the `dialout` group; BLE needs host
+Bluetooth.
 
 Prefer a package manager or a headless box? See **Install** below (pip / Docker / systemd).
 

@@ -1,7 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec — builds a single-file siliqs-mesh-bridge desktop app for the host OS.
-#   pyinstaller siliqs-mesh-bridge.spec           # -> dist/siliqs-mesh-bridge[.exe]
+#   pyinstaller siliqs-mesh-bridge.spec  # -> dist/siliqs-mesh-bridge[.exe] (+ .app on macOS)
 # Cross-platform: run this on each OS (macOS/Windows/Linux) — see .github/workflows.
+import sys
 from PyInstaller.utils.hooks import collect_all
 
 # meshtastic ships generated protobufs + data; bleak/pyserial/paho/pubsub have submodules
@@ -28,18 +29,36 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name="siliqs-mesh-bridge",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    runtime_tmpdir=None,
-    console=True,          # the app IS a small local server — the console shows its log; close to quit
-    icon=None,
-)
+if sys.platform == "darwin":
+    # macOS: onedir → .app bundle. A bare no-extension binary opens in TextEdit when
+    # double-clicked; a .app double-clicks and runs. onedir (not onefile) is the robust
+    # form for a downloaded/quarantined .app under Gatekeeper. The browser control panel
+    # is the UI — quit it with the panel's "Quit app" button.
+    exe = EXE(
+        pyz, a.scripts, [], exclude_binaries=True,
+        name="siliqs-mesh-bridge",
+        debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
+        console=True, icon=None,
+    )
+    coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="siliqs-mesh-bridge")
+    app = BUNDLE(
+        coll,
+        name="siliqs-mesh-bridge.app",
+        icon=None,
+        bundle_identifier="net.siliqs.mesh-bridge",
+        info_plist={
+            "CFBundleName": "siliqs-mesh-bridge",
+            "CFBundleDisplayName": "Siliqs Mesh Bridge",
+            "CFBundleShortVersionString": "0.2.1",
+            "NSHighResolutionCapable": True,
+        },
+    )
+else:
+    # Windows / Linux: a single self-contained file. On Windows the .exe double-clicks;
+    # on Linux `chmod +x` then run. The console shows the log (close it to quit).
+    exe = EXE(
+        pyz, a.scripts, a.binaries, a.datas, [],
+        name="siliqs-mesh-bridge",
+        debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
+        runtime_tmpdir=None, console=True, icon=None,
+    )

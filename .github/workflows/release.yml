@@ -24,7 +24,7 @@ jobs:
             asset: siliqs-mesh-bridge-windows-x86_64.exe
             bin: siliqs-mesh-bridge.exe
           - os: macos-latest
-            asset: siliqs-mesh-bridge-macos-arm64
+            asset: siliqs-mesh-bridge-macos-arm64.zip
             bin: siliqs-mesh-bridge
     runs-on: ${{ matrix.os }}
     steps:
@@ -42,11 +42,16 @@ jobs:
       - name: Build
         run: pyinstaller --noconfirm siliqs-mesh-bridge.spec
 
-      - name: Rename artifact
+      - name: Package artifact
         shell: bash
         run: |
           mkdir -p out
-          cp "dist/${{ matrix.bin }}" "out/${{ matrix.asset }}"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            # zip the .app bundle (a directory) so it downloads as one file + double-clicks
+            ditto -c -k --keepParent "dist/siliqs-mesh-bridge.app" "out/${{ matrix.asset }}"
+          else
+            cp "dist/${{ matrix.bin }}" "out/${{ matrix.asset }}"
+          fi
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
