@@ -130,9 +130,15 @@ class Runner:
             self.cfg = cfg
             self.log.clear()
             self.log.append("$ siliqs-mesh-bridge " + " ".join(argv))
+            # Spawn the bridge CLI. In a normal Python install we run the .py with the
+            # interpreter; inside a PyInstaller bundle there IS no python and no .py on
+            # disk, so sys.executable is the frozen app itself — re-exec it with the
+            # --sq-run-bridge flag (handled in app.py) so it runs the bridge instead.
+            cmd = ([sys.executable, "--sq-run-bridge", *argv]
+                   if getattr(sys, "frozen", False)
+                   else [sys.executable, "-u", BRIDGE, *argv])
             self.proc = subprocess.Popen(
-                [sys.executable, "-u", BRIDGE, *argv],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             threading.Thread(target=self._pump, daemon=True).start()
         _save_cfg(cfg)                              # persist for reboot auto-start
         if cfg.get("handler") == "mqtt" and cfg.get("broker"):

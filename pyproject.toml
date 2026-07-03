@@ -28,6 +28,7 @@ Homepage = "https://github.com/livinghuang/siliqs-mesh-bridge"
 [project.scripts]
 siliqs-mesh-bridge = "siliqs_mesh_bridge:main"
 siliqs-mesh-bridge-web = "siliqs_mesh_bridge_web:main"   # local browser control panel
+siliqs-mesh-bridge-app = "app:main"                      # double-click launcher (panel + auto-open browser)
 
 [tool.setuptools]
-py-modules = ["siliqs_mesh_bridge", "siliqs_mesh_bridge_web"]
+py-modules = ["siliqs_mesh_bridge", "siliqs_mesh_bridge_web", "app"]
