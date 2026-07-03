@@ -328,15 +328,30 @@ def list_ports():
     """
     seen, out = set(), []
 
-    def add(dev, desc=""):
+    def classify(dev, desc, vid=None):
+        """Return (is_node, rank). Lower rank sorts first. A Meshtastic node shows up
+        as an Espressif native-USB CDC (303a:1001) or a USB-UART bridge (CH340/CP210x);
+        host pseudo-ports (debug-console, Bluetooth) are pushed to the bottom so the
+        user isn't tempted to pick them."""
+        d, s = dev.lower(), (desc or "").lower()
+        if any(j in d for j in ("debug-console", "bluetooth", "wlan-debug")):
+            return False, 9
+        node = (vid == 0x303A                                   # Espressif (ESP32-C3 JTAG/serial)
+                or any(k in s for k in ("jtag", "ch340", "cp210", "ch910", "usb serial", "usb single serial"))
+                or any(k in d for k in ("usbmodem", "usbserial", "ttyacm", "ttyusb",
+                                        "sqc485i", "-meshtastic")))
+        return node, (0 if node else 5)
+
+    def add(dev, desc="", vid=None):
         if dev and dev not in seen:
             seen.add(dev)
-            out.append({"device": dev, "desc": desc})
+            node, rank = classify(dev, desc, vid)
+            out.append({"device": dev, "desc": desc, "node": node, "rank": rank})
 
     try:
         from serial.tools import list_ports as lp
         for p in lp.comports():
-            add(p.device, p.description or "")
+            add(p.device, p.description or "", getattr(p, "vid", None))
     except Exception:
         pass
     # raw /dev scan — catches container --device maps and udev symlinks pyserial misses
@@ -352,6 +367,7 @@ def list_ports():
             add(cfg["port"], "configured")
     except Exception:
         pass
+    out.sort(key=lambda p: (p["rank"], p["device"]))
     return out
 
 
@@ -491,9 +507,10 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
    <label><input type="radio" name="iface" value="usb" checked> USB</label>
    <label><input type="radio" name="iface" value="ble"> BLE</label></div>
   <div class="row" id="usbRow" style="margin-top:12px">
-   <div class="field" style="flex:2"><label>Serial port</label><input id="port" list="portlist" placeholder="/dev/ttyACM0 — or type a path"><datalist id="portlist"></datalist></div>
+   <div class="field" style="flex:2"><label>Serial port</label><select id="portSel"></select></div>
    <div class="field" style="flex:0"><label>&nbsp;</label><button id="refresh" type="button">↻ refresh</button></div></div>
-  <p class="note" id="portHint" style="margin:2px 0 0">Pick from the list, or <b>type the device path</b> — in a container the auto-list is often empty even when the device works (e.g. <code>/dev/sqc485i-meshtastic</code>).</p>
+  <div class="field hide" id="portManual" style="margin-top:8px"><label>Device path</label><input id="port" placeholder="/dev/ttyACM0"></div>
+  <p class="note" id="portHint" style="margin:2px 0 0">Pick your node from the list (nodes are marked <b>◆ node</b>) and click <b>↻ refresh</b> after plugging in. Not listed? Choose <b>“✎ type a path…”</b> — in a container the scan is often empty even when the device works (e.g. <code>/dev/sqc485i-meshtastic</code>).</p>
   <div class="row hide" id="bleRow" style="margin-top:12px">
    <div class="field"><label>BLE device name or address</label><input id="ble" placeholder="e.g. SQC485I"></div></div>
  </div>
@@ -568,13 +585,29 @@ function syncUI(){
  $('telCard').classList.toggle('hide', handlerVal()!=='mqtt');
 }
 $('iface').onchange=syncUI; $('handler').onchange=syncUI;
+const MANUAL='__type__';
+function applyPortSel(){                        // mirror the visible <select> into #port (the value source)
+ const sel=$('portSel'); const manual=sel.value===MANUAL;
+ $('portManual').classList.toggle('hide',!manual);
+ if(manual){ if($('port').value===''||$('portSel').dataset.wasReal==='1') $('port').focus(); }
+ else if(sel.value){ $('port').value=sel.value; }
+ $('portSel').dataset.wasReal=manual?'0':'1';
+}
 async function loadPorts(){
- const r=await fetch('/api/ports'); const d=await r.json();
- const dl=$('portlist');                       // datalist suggestions; the input keeps its typed value
- dl.innerHTML=d.ports.map(p=>`<option value="${p.device}">${p.desc}</option>`).join('');
- if(!$('port').value && d.ports.length) $('port').value=d.ports[0].device;
+ let d; try{ d=await (await fetch('/api/ports')).json(); }catch(e){ return; }
+ const sel=$('portSel'); const cur=$('port').value;   // preserve the current choice across refreshes
+ const opts=(d.ports||[]).map(p=>{
+   const mark=p.node?'◆ ':''; const tail=p.desc?` — ${p.desc}`:'';
+   return `<option value="${p.device}">${mark}${p.device}${tail}</option>`;}).join('');
+ sel.innerHTML=(opts||'')+`<option value="${MANUAL}">✎ type a path…</option>`;
+ const known=(d.ports||[]).some(p=>p.device===cur);
+ if(cur && known)      sel.value=cur;                 // keep what was selected
+ else if(cur)          sel.value=MANUAL;              // a custom path was typed → manual mode
+ else if((d.ports||[]).length) sel.value=d.ports[0].device;  // default to the first (nodes sort first)
+ applyPortSel();
 }
 $('refresh').onclick=loadPorts;
+$('portSel').onchange=applyPortSel;
 function cfg(){
  const c={iface:ifaceVal(),handler:handlerVal()};
  if(c.iface==='usb') c.port=val('port'); else c.ble=val('ble');
@@ -602,7 +635,7 @@ function seedForm(c){           // populate the form from the saved/running conf
  set('ble',c.ble);set('peer',c.peer);set('link',c.link);set('mode',c.mode);set('mtu',c.mtu);
  set('broker',c.broker);set('brokerPort',c.broker_port);set('channel',c.channel);
  syncUI();
- if(c.port)$('port').value=c.port;   // free-text input now — just restore the path
+ if(c.port){$('port').value=c.port; loadPorts();}   // restore the saved path, then reconcile the dropdown
 }
 async function poll(){
  try{const r=await fetch('/api/state');const d=await r.json();

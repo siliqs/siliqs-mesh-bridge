@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "siliqs-mesh-bridge"
-version = "0.2.1"
+version = "0.2.2"
 description = "Host-side Meshtastic bridge — a transparent serial pipe (and more) over a LoRa mesh"
 readme = "README.md"
 requires-python = ">=3.9"
