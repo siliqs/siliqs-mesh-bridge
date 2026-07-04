@@ -49,7 +49,7 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "siliqs-mesh-bridge",
             "CFBundleDisplayName": "Siliqs Mesh Bridge",
-            "CFBundleShortVersionString": "0.3.3",
+            "CFBundleShortVersionString": "0.3.4",
             "NSHighResolutionCapable": True,
         },
     )
@@ -60,5 +60,6 @@ else:
         pyz, a.scripts, a.binaries, a.datas, [],
         name="siliqs-mesh-bridge",
         debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
-        runtime_tmpdir=None, console=True, icon=None,
+        runtime_tmpdir=None, console=True,
+        icon="siliqs-mesh-bridge.ico",   # embedded in the Windows .exe (ignored on Linux)
     )
