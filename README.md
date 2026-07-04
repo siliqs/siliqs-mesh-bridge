@@ -14,6 +14,27 @@ but needs to reach a remote serial/RS485 device over LoRa.
 > (Modbus over serial, console, occasional messages) — **not** high-throughput or
 > latency-sensitive streams.
 
+## Charter — the one problem this solves
+
+Siliqs ships three sibling tools, one per step of a node's life: **provision → configure → integrate** (裝 → 設 → 接). This is **step 3, integrate**.
+
+- **Who** — someone who needs the mesh data **in their own system** (integrator / IT / has a cloud or plant control).
+- **The pain (user's words)** — *"The node runs on the mesh, but the data is **stuck in the mesh** — my cloud / database / SCADA can't reach it. And I don't want to put WiFi/MQTT on the node."*
+- **What it removes** — the node never has to be online; the **host** translates the mesh data and delivers it onward.
+- **In → out** — a node on USB/BLE → (pick a north-bound output) → data into **MQTT / serial tunnel / (future) Modbus-TCP**.
+- **Done when** — the remote RS485 device's values show up in the user's **existing** system.
+
+> **One-liner: "Bring mesh data into the system you already run."**
+
+### For future maintainers — stay on this target
+
+This app is a **data on-ramp** — it gets mesh data *out* to somewhere the user already runs. Before adding a feature, ask: *does it help move data from a connected node into an external system?* If not, it belongs to a sibling tool:
+
+- Getting **firmware onto the board** → **Flasher** (flasher.siliqs.net).
+- Deciding **what the node does** (role / Modbus poll plan / deep sleep) → **Configurator** (mesh.siliqs.net).
+
+Adding a **new north-bound output** (MQTT, Modbus-TCP, HTTP webhook, InfluxDB) is squarely in scope — that's the same job, one more exit. **Re-implementing node configuration or firmware flashing here is not** — it duplicates a sibling and blurs the boundary. One legitimate grey area: a **read-only "is it working?" view** (nodes seen, last-heard, decoded values). That's observability; it's fine *as a window on the data already flowing through this app*, but if it grows into managing the fleet it has become its own tool — split it out. When in doubt, keep this focused on *node in → external system out.*
+
 ## Download & run (no Python needed)
 
 Grab the single-file app for your OS from the
