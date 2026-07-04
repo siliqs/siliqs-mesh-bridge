@@ -24,7 +24,7 @@ jobs:
             asset: siliqs-mesh-bridge-windows-x86_64.exe
             bin: siliqs-mesh-bridge.exe
           - os: macos-latest
-            asset: siliqs-mesh-bridge-macos-arm64.zip
+            asset: siliqs-mesh-bridge-macos-arm64.dmg
             bin: siliqs-mesh-bridge
     runs-on: ${{ matrix.os }}
     steps:
@@ -37,7 +37,7 @@ jobs:
       - name: Install deps + PyInstaller
         run: |
           python -m pip install --upgrade pip
-          pip install ".[mqtt]" pyinstaller
+          pip install "." pyinstaller
 
       - name: Build
         run: pyinstaller --noconfirm siliqs-mesh-bridge.spec
@@ -47,8 +47,14 @@ jobs:
         run: |
           mkdir -p out
           if [ "${{ runner.os }}" = "macOS" ]; then
-            # zip the .app bundle (a directory) so it downloads as one file + double-clicks
-            ditto -c -k --keepParent "dist/siliqs-mesh-bridge.app" "out/${{ matrix.asset }}"
+            # Build a .dmg with the classic drag-to-Applications layout. hdiutil (no
+            # Finder/AppleScript) is reliable on the headless CI runner: a staging folder
+            # holding the .app + an "Applications" symlink → a compressed (UDZO) image.
+            staging="$(mktemp -d)"
+            cp -R "dist/siliqs-mesh-bridge.app" "$staging/"
+            ln -s /Applications "$staging/Applications"
+            hdiutil create -volname "Siliqs Mesh Bridge" -srcfolder "$staging" \
+              -fs HFS+ -format UDZO -ov "out/${{ matrix.asset }}"
           else
             cp "dist/${{ matrix.bin }}" "out/${{ matrix.asset }}"
           fi

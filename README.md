@@ -58,7 +58,7 @@ it opens a **browser control panel** (`http://127.0.0.1:8765`) where you pick yo
 | OS | File | Run |
 |----|------|-----|
 | **Windows** | `siliqs-mesh-bridge-windows-x86_64.exe` | double-click (SmartScreen: *More info → Run anyway*) |
-| **macOS** | `siliqs-mesh-bridge-macos-arm64.zip` | unzip → double-click **siliqs-mesh-bridge.app**; first launch: **right-click → Open** (unsigned) |
+| **macOS** | `siliqs-mesh-bridge-macos-arm64.dmg` | open the `.dmg` → drag **siliqs-mesh-bridge.app** onto **Applications**; first launch: **right-click → Open** (unsigned) |
 | **Linux** | `siliqs-mesh-bridge-linux-x86_64` | `chmod +x ./siliqs-mesh-bridge-linux-x86_64 && ./…` |
 
 Close the app with the **"⏻ Quit app"** button in the control panel (or, on Windows/Linux,
