@@ -49,7 +49,7 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "siliqs-mesh-bridge",
             "CFBundleDisplayName": "Siliqs Mesh Bridge",
-            "CFBundleShortVersionString": "0.2.2",
+            "CFBundleShortVersionString": "0.3.1",
             "NSHighResolutionCapable": True,
         },
     )

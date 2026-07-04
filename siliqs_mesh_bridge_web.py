@@ -391,9 +391,14 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  header b{font-size:16px}header .tag{font-size:12px;color:var(--mut)}
  .dot{width:10px;height:10px;border-radius:50%;background:#555;transition:background .2s}
  .dot.on{background:var(--ac2);box-shadow:0 0 8px var(--ac2)}
- .layout{display:grid;grid-template-columns:200px minmax(0,1fr) 340px;max-width:1280px;margin:0 auto;align-items:start}
+ .layout{display:grid;grid-template-columns:200px minmax(0,1fr) var(--telw,340px);align-items:start}
  nav{position:sticky;top:52px;align-self:start;padding:22px 16px;border-right:1px solid var(--bd)}
  aside.tel{position:sticky;top:52px;align-self:start;height:calc(100vh - 52px);border-left:1px solid var(--bd);background:var(--panel);display:flex;flex-direction:column;min-width:0}
+ .telgrip{position:absolute;left:-6px;top:0;width:12px;height:100%;cursor:col-resize;z-index:6;display:flex;align-items:center;justify-content:center}
+ .telgrip::before{content:"";position:absolute;left:5px;top:0;width:2px;height:100%;background:transparent;transition:background .15s}
+ .telgrip:hover::before,.telgrip.drag::before{background:var(--ac)}
+ .telgrip::after{content:"⋮⋮";writing-mode:vertical-lr;letter-spacing:-3px;font-size:12px;color:var(--mut);background:var(--panel);border:1px solid var(--bd);border-radius:6px;padding:8px 2px;transition:color .15s,border-color .15s}
+ .telgrip:hover::after,.telgrip.drag::after{color:var(--ac);border-color:var(--ac)}
  aside.tel .telhead{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid var(--bd)}
  aside.tel .telhead b{font-size:14px}aside.tel .telhead .note{margin-left:auto}
  aside.tel .telbody{flex:1;overflow:auto;padding:14px 16px}
@@ -441,7 +446,8 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  .note{font-size:12px;color:var(--mut)}.evs{max-height:280px;overflow:auto}
  @media(max-width:980px){.layout{grid-template-columns:1fr}
   nav{position:static;border-right:0;border-bottom:1px solid var(--bd);display:flex;gap:8px;overflow:auto}nav hr,nav .step span{display:none}
-  aside.tel{position:static;height:auto;border-left:0;border-top:1px solid var(--bd)}aside.tel .telbody{max-height:460px}}
+  aside.tel{position:static;height:auto;border-left:0;border-top:1px solid var(--bd)}aside.tel .telbody{max-height:460px}
+  .telgrip{display:none}}
 </style></head><body>
 <header><span id="dot" class="dot"></span><b>Siliqs Gateway</b>
  <span class="tag">mesh ⇄ MQTT bridge</span><span style="flex:1"></span>
@@ -567,8 +573,9 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   </div>
  </main>
 
- <!-- live telemetry — right activity panel (mesh.siliqs.net style) -->
+ <!-- live telemetry — right activity panel (mesh.siliqs.net style); drag the grip to resize -->
  <aside class="tel">
+  <div class="telgrip" id="telgrip" title="Drag to resize"></div>
   <div class="telhead"><span id="dot2" class="dot"></span><b data-en="Live telemetry" data-zh="即時遙測">Live telemetry</b><span class="note" id="telMeta"></span></div>
   <div class="telbody">
    <p class="sub" data-en="Latest frame per node, decoded from the broker. Proof the data is flowing." data-zh="每個節點最新一筆(從 broker 解出)。證明資料在流動。">Latest frame per node, decoded from the broker. Proof the data is flowing.</p>
@@ -711,6 +718,28 @@ async function pollTel(){
   $('telEvents').innerHTML=E.map(e=>`<tr><td class="note" style="white-space:nowrap">${new Date(e.t*1000).toLocaleTimeString()}</td><td class="node mono">${e.node}</td><td class="mono">${hx(e.hex)}</td></tr>`).join('');
  }catch(e){}
 }
+/* ---- drag the grip to resize the telemetry panel (persisted) ---- */
+const _layout=document.querySelector('.layout');
+let telw=340; try{telw=parseInt(localStorage.getItem('smb-telw'))||340;}catch(e){}
+function setTelw(w){
+ const maxw=Math.max(360,window.innerWidth-460);   // grow up to viewport − (nav + a minimal main)
+ telw=Math.max(280,Math.min(maxw,Math.round(w)));
+ _layout.style.setProperty('--telw',telw+'px');
+}
+setTelw(telw);
+window.addEventListener('resize',()=>setTelw(telw));   // re-clamp if the window shrinks
+$('telgrip').addEventListener('mousedown',e=>{
+ e.preventDefault();
+ const startX=e.clientX, startW=telw, grip=$('telgrip');
+ grip.classList.add('drag'); document.body.style.cursor='col-resize'; document.body.style.userSelect='none';
+ function mv(ev){ setTelw(startW + (startX - ev.clientX)); }   // drag left → wider
+ function up(){ document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up);
+   grip.classList.remove('drag'); document.body.style.cursor=''; document.body.style.userSelect='';
+   try{localStorage.setItem('smb-telw',telw);}catch(e){} }
+ document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up);
+});
+$('telgrip').addEventListener('dblclick',()=>{setTelw(340);try{localStorage.setItem('smb-telw',340);}catch(e){}});  // dbl-click = reset
+
 let initLang='en';try{initLang=localStorage.getItem('smb-lang')||((navigator.language||'').toLowerCase().indexOf('zh')===0?'zh':'en');}catch(e){}
 applyLang(initLang);
 syncUI();loadPorts();poll();setInterval(poll,1000);pollTel();setInterval(pollTel,2000);
