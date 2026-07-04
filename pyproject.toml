@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "siliqs-mesh-bridge"
-version = "0.2.2"
-description = "Host-side Meshtastic bridge — a transparent serial pipe (and more) over a LoRa mesh"
+version = "0.3.0"
+description = "Siliqs Gateway — a bidirectional mesh ⇄ MQTT bridge for Meshtastic LoRa nodes"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "Siliqs / Guinea Technology" }]
 # meshtastic pulls in pypubsub and pyserial; bleak (for --iface ble) comes with it too.
-dependencies = ["meshtastic>=2.6"]
+# The bridge and the serial-over-MQTT client both need paho-mqtt.
+dependencies = ["meshtastic>=2.6", "paho-mqtt>=2"]
 keywords = ["meshtastic", "lora", "serial", "bridge", "rs485", "mqtt", "siliqs"]
 classifiers = [
   "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
@@ -19,16 +20,15 @@ classifiers = [
   "Topic :: Communications",
 ]
 
-[project.optional-dependencies]
-mqtt = ["paho-mqtt>=2"]   # only the `--handler mqtt` gateway needs this
-
 [project.urls]
 Homepage = "https://github.com/livinghuang/siliqs-mesh-bridge"
 
 [project.scripts]
-siliqs-mesh-bridge = "siliqs_mesh_bridge:main"
+siliqs-mesh-bridge = "siliqs_mesh_bridge:main"           # the Gateway: mesh ⇄ MQTT bridge (CLI)
 siliqs-mesh-bridge-web = "siliqs_mesh_bridge_web:main"   # local browser control panel
 siliqs-mesh-bridge-app = "app:main"                      # double-click launcher (panel + auto-open browser)
+siliqs-serial-mqtt = "siliqs_serial_mqtt:main"           # serial-over-MQTT client (virtual serial cable)
+siliqs-mqtt-broker = "siliqs_mqtt_broker:main"           # tiny built-in MQTT broker (no external broker needed)
 
 [tool.setuptools]
-py-modules = ["siliqs_mesh_bridge", "siliqs_mesh_bridge_web", "app"]
+py-modules = ["siliqs_mesh_bridge", "siliqs_mesh_bridge_web", "siliqs_serial_mqtt", "siliqs_mqtt_broker", "app"]
