@@ -44,12 +44,12 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="siliqs-mesh-bridge.app",
-        icon=None,
+        icon="siliqs-mesh-bridge.icns",   # Siliqs-blue ⇄ bridge glyph (Finder/Dock icon)
         bundle_identifier="net.siliqs.mesh-bridge",
         info_plist={
             "CFBundleName": "siliqs-mesh-bridge",
             "CFBundleDisplayName": "Siliqs Mesh Bridge",
-            "CFBundleShortVersionString": "0.3.2",
+            "CFBundleShortVersionString": "0.3.3",
             "NSHighResolutionCapable": True,
         },
     )

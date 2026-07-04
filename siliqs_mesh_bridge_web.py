@@ -720,14 +720,18 @@ async function pollTel(){
 }
 /* ---- drag the grip to resize the telemetry panel (persisted) ---- */
 const _layout=document.querySelector('.layout');
-let telw=340; try{telw=parseInt(localStorage.getItem('smb-telw'))||340;}catch(e){}
+const _defTelw=()=>Math.round(window.innerWidth*0.30);   // default = 30% of the browser width
+let telw, telwCustom=false;
+try{const s=parseInt(localStorage.getItem('smb-telw')); if(s){telw=s; telwCustom=true;}}catch(e){}
+if(!telw) telw=_defTelw();
 function setTelw(w){
  const maxw=Math.max(360,window.innerWidth-460);   // grow up to viewport − (nav + a minimal main)
  telw=Math.max(280,Math.min(maxw,Math.round(w)));
  _layout.style.setProperty('--telw',telw+'px');
 }
 setTelw(telw);
-window.addEventListener('resize',()=>setTelw(telw));   // re-clamp if the window shrinks
+// on resize: keep the 30% proportion until the user drags a custom width, then just re-clamp
+window.addEventListener('resize',()=>setTelw(telwCustom?telw:_defTelw()));
 $('telgrip').addEventListener('mousedown',e=>{
  e.preventDefault();
  const startX=e.clientX, startW=telw, grip=$('telgrip');
@@ -735,10 +739,12 @@ $('telgrip').addEventListener('mousedown',e=>{
  function mv(ev){ setTelw(startW + (startX - ev.clientX)); }   // drag left → wider
  function up(){ document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up);
    grip.classList.remove('drag'); document.body.style.cursor=''; document.body.style.userSelect='';
-   try{localStorage.setItem('smb-telw',telw);}catch(e){} }
+   telwCustom=true; try{localStorage.setItem('smb-telw',telw);}catch(e){} }
  document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up);
 });
-$('telgrip').addEventListener('dblclick',()=>{setTelw(340);try{localStorage.setItem('smb-telw',340);}catch(e){}});  // dbl-click = reset
+$('telgrip').addEventListener('dblclick',()=>{   // dbl-click = reset to the 30% default
+ telwCustom=false; setTelw(_defTelw()); try{localStorage.removeItem('smb-telw');}catch(e){}
+});
 
 let initLang='en';try{initLang=localStorage.getItem('smb-lang')||((navigator.language||'').toLowerCase().indexOf('zh')===0?'zh':'en');}catch(e){}
 applyLang(initLang);
