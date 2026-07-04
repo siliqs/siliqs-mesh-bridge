@@ -50,16 +50,16 @@ Adding a **new north-bound output** (MQTT, Modbus-TCP, HTTP webhook, InfluxDB) i
 
 ## Download & run (no Python needed)
 
-Grab the single-file app for your OS from the
-[**Releases**](https://github.com/livinghuang/siliqs-mesh-bridge/releases) page and run it —
-it opens a **browser control panel** (`http://127.0.0.1:8765`) where you pick your node
-(USB/BLE), your MQTT broker, and Start. No install, no command line.
+Download the app for your OS from **[siliqs.net/downloads](https://siliqs.net/downloads/)**
+(hosted on siliqs.net's CDN — reachable in China, unlike GitHub) and run it — it opens a
+**browser control panel** (`http://127.0.0.1:8765`) where you pick your node (USB/BLE), your
+MQTT broker, and Start. No install, no command line.
 
-| OS | File | Run |
+| OS | Download | Run |
 |----|------|-----|
-| **Windows** | `siliqs-mesh-bridge-windows-x86_64.exe` | double-click (SmartScreen: *More info → Run anyway*) |
-| **macOS** | `siliqs-mesh-bridge-macos-arm64.dmg` | open the `.dmg` → drag **siliqs-mesh-bridge.app** onto **Applications**; first launch: **right-click → Open** (unsigned) |
-| **Linux** | `siliqs-mesh-bridge-linux-x86_64` | `chmod +x ./siliqs-mesh-bridge-linux-x86_64 && ./…` |
+| **Windows** | [`…-windows-x86_64.exe`](https://siliqs.net/downloads/siliqs-mesh-bridge-windows-x86_64.exe) | double-click (SmartScreen: *More info → Run anyway*) |
+| **macOS** | [`…-macos-arm64.dmg`](https://siliqs.net/downloads/siliqs-mesh-bridge-macos-arm64.dmg) | open the `.dmg` → drag **siliqs-mesh-bridge.app** onto **Applications**; first launch: **right-click → Open** (unsigned) |
+| **Linux** | [`…-linux-x86_64`](https://siliqs.net/downloads/siliqs-mesh-bridge-linux-x86_64) | `chmod +x ./siliqs-mesh-bridge-linux-x86_64 && ./…` |
 
 Close the app with the **"⏻ Quit app"** button in the control panel (or, on Windows/Linux,
 close the console window). The builds are unsigned (community app) — the "unknown developer"
