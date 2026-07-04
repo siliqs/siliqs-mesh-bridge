@@ -16,7 +16,7 @@ PROFILE=siliqs
 REGION=ap-northeast-1
 BUCKET=siliqs-net-site-test
 CF_DIST=EICN3L9GA5F65
-REPO=livinghuang/siliqs-mesh-bridge
+REPO=siliqs/siliqs-mesh-bridge
 FILES=(
   siliqs-mesh-bridge-macos-arm64.dmg
   siliqs-mesh-bridge-windows-x86_64.exe

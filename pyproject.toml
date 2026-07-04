@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/livinghuang/siliqs-mesh-bridge"
+Homepage = "https://github.com/siliqs/siliqs-mesh-bridge"
 
 [project.scripts]
 siliqs-mesh-bridge = "siliqs_mesh_bridge:main"           # the Gateway: mesh ⇄ MQTT bridge (CLI)
