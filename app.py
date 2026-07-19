@@ -47,11 +47,31 @@ def _open_browser_when_up():
         pass
 
 
+def _panel_already_running():
+    """True if a previous launch is already serving the control panel on PORT. Re-launching the
+    .app would otherwise try to bind the same port, fail with EADDRINUSE, and exit — which macOS
+    reports as 'the application did not open'."""
+    import socket
+    try:
+        with socket.create_connection((HOST, PORT), timeout=0.6):
+            return True
+    except OSError:
+        return False
+
+
 def _run_panel():
-    """Normal launch: serve the control panel + open the browser."""
+    """Normal launch: serve the control panel + open the browser. If one is already running (the
+    user re-opened the app without quitting), just reopen the browser at it — don't crash."""
+    if _panel_already_running():
+        print(f"siliqs-mesh-bridge is already running → reopening http://{HOST}:{PORT}")
+        try:
+            webbrowser.open(f"http://{HOST}:{PORT}")
+        except Exception:
+            pass
+        return
     import siliqs_mesh_bridge_web as web
     threading.Thread(target=_open_browser_when_up, daemon=True).start()
-    print(f"siliqs-mesh-bridge → opening http://{HOST}:{PORT}  (close this window to quit)")
+    print(f"siliqs-mesh-bridge → opening http://{HOST}:{PORT}  (use the “Quit” button in the panel to stop)")
     sys.argv = ["siliqs-mesh-bridge-web", "--host", HOST, "--port", str(PORT)]
     web.main()
 
