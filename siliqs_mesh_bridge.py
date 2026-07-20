@@ -104,6 +104,20 @@ def open_south(args):
     return open_usb(args.port)
 
 
+def _state_dir():
+    """Per-user state dir for things worth keeping across restarts (the heard log)."""
+    base = os.environ.get("SMB_STATE_DIR")
+    if base:
+        return base
+    home = os.path.expanduser("~")
+    if sys.platform == "darwin":
+        return os.path.join(home, "Library", "Application Support", "siliqs-mesh-bridge")
+    if os.name == "nt":
+        return os.path.join(os.environ.get("APPDATA", home), "siliqs-mesh-bridge")
+    return os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(home, ".config")),
+                        "siliqs-mesh-bridge")
+
+
 def _nid(num):
     """0x7d51bdc4 → '!7d51bdc4' (Meshtastic string node id)."""
     try:
@@ -177,9 +191,11 @@ class MeshMqttBridge:
         self.cmd_topic = "siliqs/mesh/cmd"            # panel → bridge control channel
         self.mesh_lock = threading.Lock()
         self.neighbors = {}                           # a_id -> {b_id: {"snr","t"}}  (a hears b)
-        self.heard = {}                               # node_id -> live {last,snr,rssi,hops} from
-        #                                               actual received packets (NodeDB lastHeard is
-        #                                               NOT refreshed by our PRIVATE_APP telemetry)
+        self.heard = {}                               # node_id -> live {first,last,snr,rssi,hops,count}
+        #                                               from actual received packets (NodeDB lastHeard
+        #                                               is NOT refreshed by our PRIVATE_APP telemetry)
+        self.heard_file = os.path.join(_state_dir(), "heard.json")   # first-seen + Rx count persist
+        self._load_heard()
         self.nodedb_interval = 20                     # seconds between NodeDB snapshots
         self.cli = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.cli.on_message = self._on_mqtt_msg
@@ -240,6 +256,7 @@ class MeshMqttBridge:
                 rec["snr"] = packet.get("rxSnr")
                 rec["rssi"] = packet.get("rxRssi")
                 rec["hops"] = hops
+                rec["relay"] = packet.get("relayNode")   # last byte of the node that relayed to us
                 rec["count"] += 1
         # normalise the portnum to an int where we can (named private ports come as a name)
         pn_int = MODBUS_PORTNUM if pn in (MODBUS_PORTNUM, str(MODBUS_PORTNUM), "PRIVATE_APP") \
@@ -304,6 +321,61 @@ class MeshMqttBridge:
         elif msg.topic == self.cmd_topic:
             self._on_mesh_cmd(msg)
 
+    def _load_heard(self):
+        try:
+            with open(self.heard_file) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self.heard = {k: v for k, v in data.items() if isinstance(v, dict)}
+        except (OSError, ValueError):
+            pass
+
+    def _save_heard(self):
+        try:
+            os.makedirs(os.path.dirname(self.heard_file), exist_ok=True)
+            tmp = self.heard_file + ".tmp"
+            with self.mesh_lock:
+                snap = dict(self.heard)
+            with open(tmp, "w") as f:
+                json.dump(snap, f)
+            os.replace(tmp, self.heard_file)          # atomic swap
+        except OSError as e:
+            if self.verbose:
+                print(f"  [mesh] heard save failed: {e}", file=sys.stderr)
+
+    def _forget_node(self, node):
+        """Delete all data for a node: our heard log + neighbor edges + the device NodeDB entry
+        (so it doesn't immediately reappear from the node's own database)."""
+        if not node:
+            return
+        with self.mesh_lock:
+            self.heard.pop(node, None)
+            self.neighbors.pop(node, None)
+            for bs in self.neighbors.values():
+                bs.pop(node, None)
+        removed = True
+        try:
+            self.iface.localNode.removeNode(node)     # remove from the node's on-device NodeDB
+        except Exception as e:  # noqa: BLE001
+            removed = False
+            if self.verbose:
+                print(f"  [mesh] removeNode({node}) failed: {e}", file=sys.stderr)
+        # also drop it from the library's in-memory NodeDB cache so it disappears at once
+        # (a still-alive node legitimately reappears on its next packet — that's expected)
+        try:
+            (getattr(self.iface, "nodes", None) or {}).pop(node, None)
+            num = int(node.replace("!", ""), 16)
+            (getattr(self.iface, "nodesByNum", None) or {}).pop(num, None)
+        except Exception:
+            pass
+        self._save_heard()
+        try:
+            self._publish_mesh()                      # refresh the view immediately
+        except Exception:
+            pass
+        self._trace_publish({"cmd": "forget", "node": node, "ok": True,
+                             "nodedb_removed": removed, "t": time.time()})
+
     def _ingest_neighborinfo(self, frm, payload):
         """A NeighborInfo packet lists the direct neighbours (and SNR) that node hears."""
         try:
@@ -338,7 +410,7 @@ class MeshMqttBridge:
                 "batt": dm.get("batteryLevel"), "volt": dm.get("voltage"),
                 "airtx": dm.get("airUtilTx"), "chutil": dm.get("channelUtilization"),
                 "last": n.get("lastHeard"), "viaMqtt": n.get("viaMqtt", False),
-                "first": None, "count": 0, "self": nid == self.node,
+                "first": None, "count": 0, "relay": None, "self": nid == self.node,
             }
             h = heard.get(nid)
             if h:                                      # live packet data wins on freshness…
@@ -348,6 +420,7 @@ class MeshMqttBridge:
                 e["rssi"] = h.get("rssi")
                 e["first"] = h.get("first")
                 e["count"] = h.get("count", 0)
+                e["relay"] = h.get("relay")
                 if e["hops"] is None and h.get("hops") is not None:
                     e["hops"] = h["hops"]              # …but keep NodeDB hopsAway (stable min-hops)
                     #                                     over a single packet's flood-path hop count
@@ -361,7 +434,7 @@ class MeshMqttBridge:
                         "snr": h.get("snr"), "rssi": h.get("rssi"), "hops": h.get("hops"),
                         "batt": None, "volt": None, "airtx": None, "chutil": None,
                         "last": h.get("last"), "first": h.get("first"), "count": h.get("count", 0),
-                        "viaMqtt": False, "self": nid == self.node})
+                        "relay": h.get("relay"), "viaMqtt": False, "self": nid == self.node})
         return out
 
     def _publish_mesh(self):
@@ -379,6 +452,7 @@ class MeshMqttBridge:
         while True:
             try:
                 self._publish_mesh()
+                self._save_heard()                    # persist first-seen + Rx count
             except Exception as e:  # noqa: BLE001
                 if self.verbose:
                     print(f"  [mesh] nodedb publish failed: {e}", file=sys.stderr)
@@ -394,6 +468,8 @@ class MeshMqttBridge:
             self._do_traceroute(m.get("to"))
         elif cmd == "neighborinfo":
             self._set_neighborinfo(bool(m.get("enable")), m.get("interval"))
+        elif cmd == "forget":
+            self._forget_node(m.get("node"))
         elif cmd == "refresh":
             try:
                 self._publish_mesh()

@@ -503,6 +503,9 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  .glegend b{color:var(--tx);font-weight:600}
  .traceitem{border:1px solid var(--bd);border-radius:8px;padding:9px 11px;margin:8px 0;font-size:12.5px}
  .traceitem .path{font-family:ui-monospace,monospace;font-size:12px;margin-top:4px}
+ .delx{cursor:pointer;color:var(--mut);margin-right:7px;font-size:11px;padding:0 3px;border-radius:4px}
+ .delx:hover{color:#fff;background:var(--dn)}
+ .nick{cursor:pointer;border-bottom:1px dotted var(--mut)}.nick:hover{color:var(--ac);border-color:var(--ac)}
  @media(max-width:980px){.layout{grid-template-columns:1fr}
   nav{position:static;border-right:0;border-bottom:1px solid var(--bd);display:flex;gap:8px;overflow:auto}nav hr,nav .step span{display:none}
   aside.tel{position:static;height:auto;border-left:0;border-top:1px solid var(--bd)}aside.tel .telbody{max-height:460px}
@@ -820,16 +823,34 @@ async function pollTel(){
 /* ---- mesh / RF insight ---- */
 const MESH_STALE=180;                       // node overdue after ~2× the 85s report interval
 const idTail=id=>(id||'').replace(/^!/,'').slice(-4);
+const lastByte=id=>parseInt((id||'').replace('!',''),16)&0xff;   // node-num low byte (for relay_node)
+const escH=s=>(s==null?'':(''+s)).replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+let NICK={}; try{NICK=JSON.parse(localStorage.getItem('smb-nick')||'{}');}catch(e){}
+const nodeName=n=>NICK[n.id]||n.short||idTail(n.id);
+function setNick(id){
+ const cur=NICK[id]||'';
+ const v=prompt(LANG==='zh'?('節點 '+id+' 的暱稱(留空清除):'):('Nickname for '+id+' (blank clears):'),cur);
+ if(v===null)return;
+ if(v.trim())NICK[id]=v.trim(); else delete NICK[id];
+ try{localStorage.setItem('smb-nick',JSON.stringify(NICK));}catch(e){}
+ renderMeshTable(); drawMeshGraph();
+}
+function relayOf(n){                         // who relayed n's traffic to us?
+ const tr=MESH.traces.find(x=>x.to===n.id && x.ok && Array.isArray(x.routeBack) && x.routeBack.length);
+ if(tr){const r=tr.routeBack.find(x=>x && x!=='!ffffffff' && x!==n.id); if(r)return r;}   // authoritative
+ if(n.hops===0)return null;                 // truly direct — ignore relay_node noise
+ if(n.relay){const m=MESH.nodes.find(x=>x.id!==n.id && lastByte(x.id)===n.relay); if(m)return m.id;}
+ return null;                               // relay_node byte match (best-effort hint; hops≥1 only)
+}
 function snrChip(s){
  if(s==null) return {c:'snrN',t:'—'};
  const cls=s>0?'snrG':(s>-10?'snrY':'snrR');
  return {c:cls,t:s.toFixed(1)};
 }
 let MESH={nodes:[],links:[],traces:[],gw:null};
-function meshParent(n,byId){
- const tr=MESH.traces.find(x=>x.to===n.id && x.ok && Array.isArray(x.routeBack) && x.routeBack.length);
- if(tr){const r=tr.routeBack.find(x=>x && x!=='!ffffffff' && x!==n.id && byId[x]); if(r) return r;}
- return MESH.gw;                            // direct, or relay unknown → attach to gateway
+function meshParent(n,byId){                 // draw the edge to the relay if we know it, else gateway
+ const r=relayOf(n);
+ return (r && byId[r]) ? r : MESH.gw;
 }
 function drawMeshGraph(){
  const svg=$('meshSvg'); if(!svg) return;
@@ -844,15 +865,19 @@ function drawMeshGraph(){
  others.forEach(n=>{
   const p=pos[n.id]; if(!p) return;
   const par=meshParent(n,byId), pp=pos[par]||pos[gw]; if(!pp) return;
-  const direct=(par===gw)&&(n.hops!=null&&n.hops<=1);
+  const direct=(par===gw)&&(n.hops===0);   // solid ONLY for a true 0-hop direct link; ≥1 hop = dashed
   const sc=snrChip(n.snr).c, col=sc==='snrG'?'#67ea94':sc==='snrY'?'#f0c85a':sc==='snrR'?'#ef6d6d':'#5b6270';
   edges+=`<line x1="${p.x.toFixed(0)}" y1="${p.y.toFixed(0)}" x2="${pp.x.toFixed(0)}" y2="${pp.y.toFixed(0)}" stroke="${col}" stroke-width="${direct?2.4:1.6}" ${direct?'':'stroke-dasharray="5 4"'} opacity=".8"/>`;
  });
  function nodeSvg(n,x,y,isgw){
   const stale=n.last&&(now-n.last>MESH_STALE), r=isgw?22:17;
   const fill=isgw?'#243b52':(stale?'#3a2226':'#1d1f27'), stroke=isgw?'#3fa7d6':(stale?'#ef6d6d':'#3a4152');
-  const lbl=esc(n.short||idTail(n.id)), sub=isgw?'GW':('!'+idTail(n.id));
-  const hlabel=(!isgw&&n.hops!=null)?(LANG==='zh'?`${n.hops} 跳`:`${n.hops} hop${n.hops===1?'':'s'}`):'';
+  const lbl=esc(nodeName(n)), sub=isgw?'GW':('!'+idTail(n.id));
+  let hlabel='';
+  if(!isgw&&n.hops!=null){
+   hlabel=LANG==='zh'?`${n.hops} 跳`:`${n.hops} hop${n.hops===1?'':'s'}`;
+   if(n.hops>=1){const rid=relayOf(n); if(rid&&byId[rid]) hlabel+=' ⤳'+esc(nodeName(byId[rid]));}
+  }
   const slabel=(!isgw&&n.snr!=null)?`SNR ${n.snr.toFixed(0)}`:'';
   const sub2=[hlabel,slabel].filter(Boolean).join(' · ');
   const hopTxt=sub2?`<text x="${x}" y="${y+r+22}" font-size="9" fill="#9aa0ad" text-anchor="middle">${sub2}</text>`:'';
@@ -896,7 +921,9 @@ function renderMeshTable(){
   const rssi=n.rssi!=null?n.rssi+' dBm':'—';
   const rx=n.count!=null&&n.count>0?n.count:'—';
   const first=n.first?new Date(n.first*1000).toLocaleTimeString():'—';
-  return `<tr class="${stale?'stale':''}"><td class="node mono">${n.self?'★ ':''}${(n.short?n.short+' ':'')}<span class="note">!${idTail(n.id)}</span></td>`
+  const del=n.self?'':`<span class="delx" title="${LANG==='zh'?'刪除此節點資料':'forget this node'}" onclick="meshForget('${n.id}')">✕</span>`;
+  const nm=`<span class="nick" title="${LANG==='zh'?'點擊設定暱稱':'click to set a nickname'}" onclick="setNick('${n.id}')">${escH(nodeName(n))}</span>`;
+  return `<tr class="${stale?'stale':''}"><td class="node mono">${del}${n.self?'★ ':''}${nm} <span class="note">!${idTail(n.id)}</span></td>`
    +`<td class="note">${role}</td><td class="${hopCls}">${hopTxt}</td>`
    +`<td><span class="chip ${sc.c}">${sc.t}</span></td><td class="note">${rssi}</td>`
    +`<td class="note">${rx}</td><td class="note">${batt}</td>`
@@ -906,13 +933,20 @@ function renderMeshTable(){
 function fillTraceSel(){
  const sel=$('traceSel'); if(!sel) return;
  const cur=sel.value, opts=MESH.nodes.filter(n=>!n.self)
-   .map(n=>`<option value="${n.id}">${n.short?n.short+' ':''}!${idTail(n.id)}</option>`).join('');
+   .map(n=>`<option value="${n.id}">${escH(nodeName(n))} · !${idTail(n.id)}</option>`).join('');
  const want=(LANG==='zh'?'選節點做 traceroute…':'pick a node to traceroute…');
  sel.innerHTML=`<option value="">${want}</option>`+opts;
  if(cur) sel.value=cur;
 }
 async function meshCmd(obj){
  try{await fetch('/api/mesh-cmd',{method:'POST',body:JSON.stringify(obj)});}catch(e){}
+}
+function meshForget(id){
+ const msg=LANG==='zh'?('刪除節點 '+id+' 的所有資料?\n(清除計數/首次發現,並從節點 NodeDB 移除)'):('Forget all data for '+id+'?\n(clears counters/first-seen and removes it from the node’s NodeDB)');
+ if(!confirm(msg))return;
+ MESH.nodes=MESH.nodes.filter(n=>n.id!==id);   // optimistic: drop it from the view now
+ renderMeshTable(); drawMeshGraph();
+ meshCmd({cmd:'forget',node:id});
 }
 async function pollMesh(){
  try{const d=await (await fetch('/api/mesh')).json();
