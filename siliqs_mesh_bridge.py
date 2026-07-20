@@ -177,6 +177,9 @@ class MeshMqttBridge:
         self.cmd_topic = "siliqs/mesh/cmd"            # panel → bridge control channel
         self.mesh_lock = threading.Lock()
         self.neighbors = {}                           # a_id -> {b_id: {"snr","t"}}  (a hears b)
+        self.heard = {}                               # node_id -> live {last,snr,rssi,hops} from
+        #                                               actual received packets (NodeDB lastHeard is
+        #                                               NOT refreshed by our PRIVATE_APP telemetry)
         self.nodedb_interval = 20                     # seconds between NodeDB snapshots
         self.cli = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.cli.on_message = self._on_mqtt_msg
@@ -222,6 +225,15 @@ class MeshMqttBridge:
         payload = bytes(payload)
         frm = packet.get("from", 0)
         sender = packet.get("fromId") or _nid(frm)
+        # real-time heard record — every packet we actually receive. This is the same live
+        # signal the telemetry view uses, so the RF map stays as fresh as the event stream
+        # (the node's own NodeDB lastHeard does NOT update on PRIVATE_APP 256 telemetry).
+        hs, hl = packet.get("hopStart"), packet.get("hopLimit")
+        hops = (hs - hl) if isinstance(hs, int) and isinstance(hl, int) else None
+        if sender:
+            with self.mesh_lock:
+                self.heard[sender] = {"last": time.time(), "snr": packet.get("rxSnr"),
+                                      "rssi": packet.get("rxRssi"), "hops": hops}
         # normalise the portnum to an int where we can (named private ports come as a name)
         pn_int = MODBUS_PORTNUM if pn in (MODBUS_PORTNUM, str(MODBUS_PORTNUM), "PRIVATE_APP") \
             else (int(pn) if isinstance(pn, int) or (isinstance(pn, str) and pn.isdigit()) else pn)
@@ -301,22 +313,45 @@ class MeshMqttBridge:
                 d[_nid(nb.node_id)] = {"snr": nb.snr, "t": now}
 
     def _snapshot_nodedb(self):
-        """Flatten the connected node's NodeDB into a compact list for the RF view."""
+        """Flatten the connected node's NodeDB into a compact list for the RF view, then overlay
+        our own real-time heard record (last/snr/rssi/hops) so freshness matches the packet
+        stream rather than the node's slower-updating NodeDB."""
         nodes = getattr(self.iface, "nodes", None) or {}
-        out = []
+        with self.mesh_lock:
+            heard = dict(self.heard)
+        out, seen = [], set()
         for _key, n in list(nodes.items()):
             u = n.get("user") or {}
             dm = n.get("deviceMetrics") or {}
             nid = u.get("id") or _nid(n.get("num"))
-            out.append({
+            e = {
                 "id": nid, "short": u.get("shortName"), "long": u.get("longName"),
                 "role": u.get("role"), "hw": u.get("hwModel"),
-                "snr": n.get("snr"), "hops": n.get("hopsAway"),
+                "snr": n.get("snr"), "rssi": None, "hops": n.get("hopsAway"),
                 "batt": dm.get("batteryLevel"), "volt": dm.get("voltage"),
                 "airtx": dm.get("airUtilTx"), "chutil": dm.get("channelUtilization"),
                 "last": n.get("lastHeard"), "viaMqtt": n.get("viaMqtt", False),
                 "self": nid == self.node,
-            })
+            }
+            h = heard.get(nid)
+            if h:                                      # live packet data wins on freshness…
+                e["last"] = h.get("last") or e["last"]
+                if h.get("snr") is not None:
+                    e["snr"] = h["snr"]
+                e["rssi"] = h.get("rssi")
+                if e["hops"] is None and h.get("hops") is not None:
+                    e["hops"] = h["hops"]              # …but keep NodeDB hopsAway (stable min-hops)
+                    #                                     over a single packet's flood-path hop count
+            out.append(e)
+            seen.add(nid)
+        # nodes we've heard on-air but that aren't in the NodeDB yet
+        for nid, h in heard.items():
+            if nid in seen:
+                continue
+            out.append({"id": nid, "short": None, "long": None, "role": None, "hw": None,
+                        "snr": h.get("snr"), "rssi": h.get("rssi"), "hops": h.get("hops"),
+                        "batt": None, "volt": None, "airtx": None, "chutil": None,
+                        "last": h.get("last"), "viaMqtt": False, "self": nid == self.node})
         return out
 
     def _publish_mesh(self):
