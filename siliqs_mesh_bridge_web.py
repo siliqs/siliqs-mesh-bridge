@@ -878,7 +878,7 @@ function drawMeshGraph(){
    hlabel=LANG==='zh'?`${n.hops} 跳`:`${n.hops} hop${n.hops===1?'':'s'}`;
    if(n.hops>=1){const rid=relayOf(n); if(rid&&byId[rid]) hlabel+=' ⤳'+esc(nodeName(byId[rid]));}
   }
-  const slabel=(!isgw&&n.snr!=null)?`SNR ${n.snr.toFixed(0)}`:'';
+  const slabel=(!isgw&&n.snr!=null)?`${n.snr.toFixed(0)} dB`:'';
   const sub2=[hlabel,slabel].filter(Boolean).join(' · ');
   const hopTxt=sub2?`<text x="${x}" y="${y+r+22}" font-size="9" fill="#9aa0ad" text-anchor="middle">${sub2}</text>`:'';
   return `<circle cx="${x}" cy="${y}" r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="2"/>`
