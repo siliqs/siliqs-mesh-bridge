@@ -83,6 +83,10 @@ class Telemetry:
         self.events = deque(maxlen=200)
         self.cli = None
         self.broker = None
+        # mesh / RF insight, fed from the bridge over siliqs/mesh/#
+        self.mesh_nodes = {}      # {"gw","t","nodes":[...]}
+        self.mesh_links = {}      # {"t","links":[...]}
+        self.traces = {}          # key (dest id / cmd) -> last result
 
     def watch(self, broker, port, username=None, password=None, tls=False,
               ca_cert=None, client_cert=None, client_key=None):
@@ -113,6 +117,7 @@ class Telemetry:
                     c.tls_set(**kw)
                 c.connect(broker, int(port), 60)
                 c.subscribe("msh/2/json/#")
+                c.subscribe("siliqs/mesh/#")     # NodeDB + neighbour graph + traceroute from the bridge
                 c.loop_start()
                 self.cli = c
                 self.broker = f"{broker}:{port}"
@@ -120,6 +125,9 @@ class Telemetry:
                 self.cli = None
 
     def _on_msg(self, client, userdata, msg):  # noqa: ARG002
+        if msg.topic.startswith("siliqs/mesh/"):
+            self._on_mesh_msg(msg.topic, msg.payload)
+            return
         try:
             d = json.loads(msg.payload)
             sender = d.get("sender") or msg.topic.split("/")[-1]
@@ -131,10 +139,41 @@ class Telemetry:
         except Exception:
             pass
 
+    def _on_mesh_msg(self, topic, payload):
+        try:
+            d = json.loads(payload)
+        except Exception:
+            return
+        with self.lock:
+            if topic == "siliqs/mesh/nodes":
+                self.mesh_nodes = d
+            elif topic == "siliqs/mesh/neighbors":
+                self.mesh_links = d
+            elif topic == "siliqs/mesh/trace":
+                self.traces[d.get("to") or d.get("cmd") or "?"] = d
+
+    def publish_cmd(self, obj):
+        with self.lock:
+            c = self.cli
+        if not c:
+            return False
+        try:
+            c.publish("siliqs/mesh/cmd", json.dumps(obj))
+            return True
+        except Exception:
+            return False
+
     def snapshot(self):
         with self.lock:
             return {"broker": self.broker, "latest": list(self.latest.values()),
                     "events": list(self.events)[-120:]}
+
+    def mesh_snapshot(self):
+        with self.lock:
+            return {"gw": self.mesh_nodes.get("gw"), "t": self.mesh_nodes.get("t"),
+                    "nodes": self.mesh_nodes.get("nodes", []),
+                    "links": self.mesh_links.get("links", []),
+                    "traces": list(self.traces.values())}
 
 
 telemetry = Telemetry()
@@ -347,6 +386,8 @@ class Handler(BaseHTTPRequestHandler):
                              "lanip": lan_ip(), "builtin_port": _builtin["port"]})
         elif self.path == "/api/telemetry":
             self._send(200, telemetry.snapshot())
+        elif self.path == "/api/mesh":
+            self._send(200, telemetry.mesh_snapshot())
         else:
             self._send(404, {"error": "not found"})
 
@@ -366,6 +407,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/stop":
             ok, msg = runner.stop()
             self._send(200, {"ok": ok, "msg": msg})
+        elif self.path == "/api/mesh-cmd":
+            ok = telemetry.publish_cmd(cfg)
+            self._send(200, {"ok": ok})
         elif self.path == "/api/quit":
             # Quit the whole app (needed for the windowless macOS .app / packaged builds,
             # which have no console to Ctrl-C). Reply first, then stop + exit shortly after.
@@ -444,6 +488,21 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  th{color:var(--mut);font-weight:500;font-size:11px}.node{color:var(--ac2)}
  pre.log{background:#0e0f13;border:1px solid var(--bd);border-radius:8px;padding:12px;max-height:200px;overflow:auto;font-size:12px;margin:0;white-space:pre-wrap;word-break:break-all}
  .note{font-size:12px;color:var(--mut)}.evs{max-height:280px;overflow:auto}
+ /* mesh / RF */
+ .meshbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 12px}
+ .meshbar select{width:auto;min-width:150px}.meshbar .btn{padding:8px 16px;font-size:13px}
+ .btn.mini{padding:6px 13px;font-size:12px;font-weight:600}
+ .chip{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;font-weight:700}
+ .snrG{background:rgba(103,234,148,.18);color:#67ea94}.snrY{background:rgba(240,200,90,.18);color:#f0c85a}
+ .snrR{background:rgba(239,109,109,.2);color:#ef6d6d}.snrN{background:var(--p2);color:var(--mut)}
+ .hop0{color:#67ea94}.hop1{color:#7fc8ff}.hopN{color:#f0c85a}
+ tr.stale td{opacity:.45}
+ .meshgraph{background:#0e0f13;border:1px solid var(--bd);border-radius:10px;margin:4px 0 14px}
+ .meshgraph svg{display:block;width:100%;height:auto}
+ .glegend{font-size:11px;color:var(--mut);margin:2px 2px 12px;display:flex;gap:14px;flex-wrap:wrap}
+ .glegend b{color:var(--tx);font-weight:600}
+ .traceitem{border:1px solid var(--bd);border-radius:8px;padding:9px 11px;margin:8px 0;font-size:12.5px}
+ .traceitem .path{font-family:ui-monospace,monospace;font-size:12px;margin-top:4px}
  @media(max-width:980px){.layout{grid-template-columns:1fr}
   nav{position:static;border-right:0;border-bottom:1px solid var(--bd);display:flex;gap:8px;overflow:auto}nav hr,nav .step span{display:none}
   aside.tel{position:static;height:auto;border-left:0;border-top:1px solid var(--bd)}aside.tel .telbody{max-height:460px}
@@ -460,6 +519,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   <a class="step" onclick="go('cNode')"><span class="n">1</span><span><b data-en="Your node" data-zh="你的節點">Your node</b><span data-en="how this PC reaches the mesh" data-zh="這台電腦怎麼連上 mesh">how this PC reaches the mesh</span></span></a>
   <a class="step" onclick="go('cBroker')"><span class="n">2</span><span><b data-en="Your broker" data-zh="你的 broker">Your broker</b><span data-en="where the data goes" data-zh="資料送去哪">where the data goes</span></span></a>
   <a class="step" onclick="go('cRun')"><span class="n">3</span><span><b data-en="Run &amp; watch" data-zh="執行與監看">Run &amp; watch</b><span data-en="start + live telemetry" data-zh="啟動 + 即時遙測">start + live telemetry</span></span></a>
+  <a class="step" onclick="go('cMesh')"><span class="n">4</span><span><b data-en="Mesh &amp; RF" data-zh="Mesh 網路">Mesh &amp; RF</b><span data-en="signal, hops, plan relays" data-zh="訊號、跳數、規劃中繼">signal, hops, plan relays</span></span></a>
   <hr>
   <p class="note" style="padding:0 6px" data-en-html="Need a wireless <b>serial cable</b>? That’s a separate tool now — <span class=&quot;mono&quot;>siliqs-serial-mqtt</span> — it rides this same broker." data-zh-html="需要無線<b>序列線</b>?那現在是獨立工具 — <span class=&quot;mono&quot;>siliqs-serial-mqtt</span> — 掛在同一個 broker。">Need a wireless <b>serial cable</b>? That’s a separate tool now — <span class="mono">siliqs-serial-mqtt</span> — it rides this same broker.</p>
  </nav>
@@ -570,6 +630,43 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     <span id="msg" class="msg note"></span>
    </div>
    <pre class="log" id="log" style="margin-top:14px">—</pre>
+  </div>
+
+  <!-- 4. mesh / RF -->
+  <div class="card" id="cMesh">
+   <h2 data-en="4 · Mesh &amp; RF — plan your deployment" data-zh="4 · Mesh 網路 — 規劃你的部署">4 · Mesh &amp; RF — plan your deployment</h2>
+   <p class="sub" data-en-html="Live view of every node your gateway has heard: signal (SNR), how many hops away, and last-heard. Use it to spot weak links and decide where a relay would help. <b>Signal comes from the radio, not MQTT</b> — it needs the gateway running." data-zh-html="閘道聽過的每顆節點即時狀態:訊號(SNR)、離幾跳、多久沒回。用來找出弱連結、判斷該在哪裡加中繼。<b>訊號來自無線電、不是 MQTT</b> — 需要閘道運行中。">Live view of every node your gateway has heard.</p>
+
+   <div class="meshgraph"><svg id="meshSvg" viewBox="0 0 640 360" role="img" aria-label="mesh link map"></svg></div>
+   <div class="glegend">
+    <span><b data-en="Link" data-zh="連結">Link</b>: <span style="color:#67ea94">━ direct</span> · <span style="color:#f0c85a">╌ via relay</span></span>
+    <span><b>SNR</b>: <span class="chip snrG">good</span> <span class="chip snrY">weak</span> <span class="chip snrR">near floor</span></span>
+    <span><b data-en="Node" data-zh="節點">Node</b>: <span style="color:#ef6d6d" data-en="red = overdue" data-zh="紅 = 逾時未回">red = overdue</span></span>
+   </div>
+
+   <div class="meshbar">
+    <select id="traceSel"></select>
+    <button class="btn go mini" id="traceBtn" data-en="↳ Traceroute" data-zh="↳ 路徑追蹤">↳ Traceroute</button>
+    <button class="btn stop mini" id="meshRefresh" data-en="↻ Refresh" data-zh="↻ 重新整理">↻ Refresh</button>
+    <span style="flex:1"></span>
+    <button class="btn stop mini" id="niBtn" data-en="Enable NeighborInfo (gateway)" data-zh="開啟 NeighborInfo(閘道)">Enable NeighborInfo (gateway)</button>
+   </div>
+   <p class="note" style="margin:-4px 0 12px" data-en-html="Traceroute shows the real path a packet takes to a node and the SNR at each hop — the direct answer to “does A still reach home, and through whom?”. NeighborInfo (optional) makes nodes broadcast their direct neighbours every 4–6 h; enabling it here affects the <b>gateway node only</b> — remote nodes need the same set separately." data-zh-html="Traceroute 顯示封包到某節點的真實路徑 + 每一跳的 SNR — 直接回答「A 還通不通、經過誰」。NeighborInfo(選配)讓節點每 4~6 小時廣播自己的直接鄰居;在這裡開只影響<b>閘道節點</b> — 遠端節點要各自開。">Traceroute shows the real path to a node.</p>
+
+   <div id="traceResults"></div>
+
+   <table>
+    <thead><tr>
+     <th data-en="Node" data-zh="節點">Node</th>
+     <th data-en="Role" data-zh="角色">Role</th>
+     <th data-en="Hops" data-zh="跳數">Hops</th>
+     <th>SNR</th>
+     <th data-en="Batt" data-zh="電量">Batt</th>
+     <th data-en="Air-util" data-zh="空中使用">Air-util</th>
+     <th data-en="Heard" data-zh="上次">Heard</th>
+    </tr></thead>
+    <tbody id="meshRows"><tr><td colspan="7" class="note" data-en="no node data yet — start the gateway; the RF map builds as nodes are heard" data-zh="尚無節點資料 — 啟動閘道,聽到節點後就會建圖">no node data yet</td></tr></tbody>
+   </table>
   </div>
  </main>
 
@@ -718,6 +815,113 @@ async function pollTel(){
   $('telEvents').innerHTML=E.map(e=>`<tr><td class="note" style="white-space:nowrap">${new Date(e.t*1000).toLocaleTimeString()}</td><td class="node mono">${e.node}</td><td class="mono">${hx(e.hex)}</td></tr>`).join('');
  }catch(e){}
 }
+/* ---- mesh / RF insight ---- */
+const MESH_STALE=180;                       // node overdue after ~2× the 85s report interval
+const idTail=id=>(id||'').replace(/^!/,'').slice(-4);
+function snrChip(s){
+ if(s==null) return {c:'snrN',t:'—'};
+ const cls=s>0?'snrG':(s>-10?'snrY':'snrR');
+ return {c:cls,t:s.toFixed(1)};
+}
+let MESH={nodes:[],links:[],traces:[],gw:null};
+function meshParent(n,byId){
+ const tr=MESH.traces.find(x=>x.to===n.id && x.ok && Array.isArray(x.routeBack) && x.routeBack.length);
+ if(tr){const r=tr.routeBack.find(x=>x && x!=='!ffffffff' && x!==n.id && byId[x]); if(r) return r;}
+ return MESH.gw;                            // direct, or relay unknown → attach to gateway
+}
+function drawMeshGraph(){
+ const svg=$('meshSvg'); if(!svg) return;
+ const W=640,H=360,cx=320,cy=182,rx=250,ry=132;
+ const gw=MESH.gw, byId={}; MESH.nodes.forEach(n=>byId[n.id]=n);
+ const others=MESH.nodes.filter(n=>!n.self);
+ const pos={}; if(gw) pos[gw]={x:cx,y:cy};
+ others.forEach((n,i)=>{const a=-Math.PI/2 + i*2*Math.PI/Math.max(1,others.length);
+   pos[n.id]={x:cx+rx*Math.cos(a),y:cy+ry*Math.sin(a)};});
+ const now=Date.now()/1000, esc=s=>(s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+ let edges='',nodes='';
+ others.forEach(n=>{
+  const p=pos[n.id]; if(!p) return;
+  const par=meshParent(n,byId), pp=pos[par]||pos[gw]; if(!pp) return;
+  const direct=(par===gw)&&(n.hops!=null&&n.hops<=1);
+  const sc=snrChip(n.snr).c, col=sc==='snrG'?'#67ea94':sc==='snrY'?'#f0c85a':sc==='snrR'?'#ef6d6d':'#5b6270';
+  edges+=`<line x1="${p.x.toFixed(0)}" y1="${p.y.toFixed(0)}" x2="${pp.x.toFixed(0)}" y2="${pp.y.toFixed(0)}" stroke="${col}" stroke-width="${direct?2.4:1.6}" ${direct?'':'stroke-dasharray="5 4"'} opacity=".8"/>`;
+ });
+ function nodeSvg(n,x,y,isgw){
+  const stale=n.last&&(now-n.last>MESH_STALE), r=isgw?22:17;
+  const fill=isgw?'#243b52':(stale?'#3a2226':'#1d1f27'), stroke=isgw?'#3fa7d6':(stale?'#ef6d6d':'#3a4152');
+  const lbl=esc(n.short||idTail(n.id)), sub=isgw?'GW':('!'+idTail(n.id));
+  const hopTxt=(!isgw&&n.hops!=null)?`<text x="${x}" y="${y+r+22}" font-size="9" fill="#9aa0ad" text-anchor="middle">${n.hops}h${n.snr!=null?' · '+n.snr.toFixed(0)+'dB':''}</text>`:'';
+  return `<circle cx="${x}" cy="${y}" r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="2"/>`
+    +`<text x="${x}" y="${y-1}" font-size="10" font-weight="700" fill="#e7e9ee" text-anchor="middle">${lbl}</text>`
+    +`<text x="${x}" y="${y+10}" font-size="8" fill="#9aa0ad" text-anchor="middle">${sub}</text>`+hopTxt;
+ }
+ others.forEach(n=>{const p=pos[n.id]; if(p) nodes+=nodeSvg(n,p.x,p.y,false);});
+ const g=MESH.nodes.find(n=>n.self); if(g&&pos[gw]) nodes+=nodeSvg(g,cx,cy,true);
+ svg.innerHTML=edges+nodes || `<text x="320" y="180" font-size="12" fill="#5b6270" text-anchor="middle">—</text>`;
+}
+function renderTraces(){
+ const box=$('traceResults'); if(!box) return;
+ const ts=MESH.traces.filter(x=>x.to).sort((a,b)=>(b.t||0)-(a.t||0)).slice(0,4);
+ if(!ts.length){box.innerHTML='';return;}
+ const fmt=a=>(a==null?'·':a.toFixed(1));
+ box.innerHTML=ts.map(x=>{
+  if(x.state==='sent') return `<div class="traceitem"><b class="mono">${x.to}</b> — ${LANG==='zh'?'已送出,等回覆…':'sent, waiting…'}</div>`;
+  if(!x.ok) return `<div class="traceitem"><b class="mono">${x.to}</b> — <span style="color:var(--dn)">${LANG==='zh'?'失敗':'failed'}: ${x.err||''}</span></div>`;
+  const fwd=(x.snrTowards||[]).map(fmt).join(' → ');
+  const back=(x.routeBack||[]).filter(v=>v!=='!ffffffff');
+  const backPath=[x.to,...back,MESH.gw||'home'].map(idTail).join(' → ');
+  const backSnr=(x.snrBack||[]).map(fmt).join(' / ');
+  return `<div class="traceitem"><b class="mono">${x.to}</b> — ${LANG==='zh'?'回程路徑':'return path'}:`
+    +`<div class="path">${backPath}</div>`
+    +`<div class="note" style="margin-top:3px">${LANG==='zh'?'去程 SNR':'toward SNR'}: ${fwd||'·'} dB · ${LANG==='zh'?'回程 SNR':'back SNR'}: ${backSnr||'·'} dB</div></div>`;
+ }).join('');
+}
+function renderMeshTable(){
+ const tb=$('meshRows'); if(!tb) return;
+ const now=Date.now()/1000;
+ const ns=MESH.nodes.slice().sort((a,b)=>(a.self?-1:b.self?1:0)||((a.hops??9)-(b.hops??9)));
+ if(!ns.length) return;
+ tb.innerHTML=ns.map(n=>{
+  const stale=n.last&&(now-n.last>MESH_STALE);
+  const sc=snrChip(n.snr);
+  const hopCls=n.self?'':(n.hops===0||n.hops===1?'hop'+n.hops:(n.hops!=null?'hopN':''));
+  const hopTxt=n.self?'—':(n.hops!=null?n.hops:'?');
+  const role=(n.role||'').replace('CLIENT_','').replace('_',' ')||(n.self?'GATEWAY':'—');
+  const batt=n.batt!=null&&n.batt<=100?n.batt+'%':(n.batt===101?'⚡':'—');
+  const air=n.airtx!=null?n.airtx.toFixed(1)+'%':'—';
+  return `<tr class="${stale?'stale':''}"><td class="node mono">${n.self?'★ ':''}${(n.short?n.short+' ':'')}<span class="note">!${idTail(n.id)}</span></td>`
+   +`<td class="note">${role}</td><td class="${hopCls}">${hopTxt}</td>`
+   +`<td><span class="chip ${sc.c}">${sc.t}</span></td><td class="note">${batt}</td><td class="note">${air}</td>`
+   +`<td class="note">${n.last?ago(n.last):'—'}</td></tr>`;
+ }).join('');
+}
+function fillTraceSel(){
+ const sel=$('traceSel'); if(!sel) return;
+ const cur=sel.value, opts=MESH.nodes.filter(n=>!n.self)
+   .map(n=>`<option value="${n.id}">${n.short?n.short+' ':''}!${idTail(n.id)}</option>`).join('');
+ const want=(LANG==='zh'?'選節點做 traceroute…':'pick a node to traceroute…');
+ sel.innerHTML=`<option value="">${want}</option>`+opts;
+ if(cur) sel.value=cur;
+}
+async function meshCmd(obj){
+ try{await fetch('/api/mesh-cmd',{method:'POST',body:JSON.stringify(obj)});}catch(e){}
+}
+async function pollMesh(){
+ try{const d=await (await fetch('/api/mesh')).json();
+  MESH={nodes:d.nodes||[],links:d.links||[],traces:d.traces||[],gw:d.gw};
+  renderMeshTable(); drawMeshGraph(); renderTraces(); fillTraceSel();
+ }catch(e){}
+}
+$('traceBtn').onclick=()=>{const to=$('traceSel').value; if(to) meshCmd({cmd:'traceroute',to});};
+$('meshRefresh').onclick=()=>meshCmd({cmd:'refresh'});
+$('niBtn').onclick=()=>{
+ const on=$('niBtn').dataset.on==='1';
+ meshCmd({cmd:'neighborinfo',enable:!on});
+ $('niBtn').dataset.on=on?'0':'1';
+ $('niBtn').textContent=(!on)?(LANG==='zh'?'關閉 NeighborInfo(閘道)':'Disable NeighborInfo (gateway)')
+                              :(LANG==='zh'?'開啟 NeighborInfo(閘道)':'Enable NeighborInfo (gateway)');
+};
+
 /* ---- drag the grip to resize the telemetry panel (persisted) ---- */
 const _layout=document.querySelector('.layout');
 const _defTelw=()=>Math.round(window.innerWidth*0.30);   // default = 30% of the browser width
@@ -749,6 +953,7 @@ $('telgrip').addEventListener('dblclick',()=>{   // dbl-click = reset to the 30%
 let initLang='en';try{initLang=localStorage.getItem('smb-lang')||((navigator.language||'').toLowerCase().indexOf('zh')===0?'zh':'en');}catch(e){}
 applyLang(initLang);
 syncUI();loadPorts();poll();setInterval(poll,1000);pollTel();setInterval(pollTel,2000);
+pollMesh();setInterval(pollMesh,4000);
 </script></body></html>"""
 
 

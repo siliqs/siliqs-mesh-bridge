@@ -173,8 +173,13 @@ class MeshMqttBridge:
         self.lock = threading.Lock()
         self.latest = {}
         self.events = deque(maxlen=200)
+        # ── mesh / RF insight state (NodeDB + neighbor graph + traceroute) ──────
+        self.cmd_topic = "siliqs/mesh/cmd"            # panel → bridge control channel
+        self.mesh_lock = threading.Lock()
+        self.neighbors = {}                           # a_id -> {b_id: {"snr","t"}}  (a hears b)
+        self.nodedb_interval = 20                     # seconds between NodeDB snapshots
         self.cli = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-        self.cli.on_message = self._on_mqtt_tx
+        self.cli.on_message = self._on_mqtt_msg
         if username:                                  # external broker auth (optional)
             self.cli.username_pw_set(username, password or None)
         if tls or ca_cert or client_cert or client_key:
@@ -188,8 +193,11 @@ class MeshMqttBridge:
             self.cli.tls_set(**kw)                    # no kw → TLS with the system CA store
         self.cli.connect(broker, broker_port, 60)
         self.cli.subscribe(self.tx_topic, qos=0)      # downlink: MQTT → mesh
+        self.cli.subscribe(self.cmd_topic, qos=0)     # mesh/RF commands (traceroute, …)
         self.cli.loop_start()
         pub.subscribe(self._on_mesh_rx, "meshtastic.receive.data")
+        # periodic NodeDB + neighbor-graph publisher (retained → late subscribers get state)
+        threading.Thread(target=self._nodedb_loop, daemon=True).start()
         if web_port:
             self._start_web(web_port)
 
@@ -230,6 +238,10 @@ class MeshMqttBridge:
         self.cli.publish(f"{self.rx_prefix}/{pn_int}", json.dumps(env))
         self.n_up += 1
 
+        # NeighborInfo (71) — build the who-hears-whom graph for the RF view
+        if pn_int == 71 or pn == "NEIGHBORINFO_APP":
+            self._ingest_neighborinfo(frm, payload)
+
         # 256 telemetry — also emit the nafco-compatible JSON + record for the web view
         if pn_int == MODBUS_PORTNUM:
             envelope = {
@@ -264,6 +276,137 @@ class MeshMqttBridge:
                       f"pn={port} {len(data)}B", file=sys.stderr)
         except Exception as e:  # noqa: BLE001
             print(f"  downlink drop: {e}", file=sys.stderr)
+
+    # ── mesh / RF insight ─────────────────────────────────────────────────────
+    def _on_mqtt_msg(self, client, userdata, msg):  # noqa: ARG002
+        """Dispatch inbound MQTT: downlink (tx) vs. mesh/RF command."""
+        if msg.topic == self.tx_topic:
+            self._on_mqtt_tx(client, userdata, msg)
+        elif msg.topic == self.cmd_topic:
+            self._on_mesh_cmd(msg)
+
+    def _ingest_neighborinfo(self, frm, payload):
+        """A NeighborInfo packet lists the direct neighbours (and SNR) that node hears."""
+        try:
+            from meshtastic import mesh_pb2
+            ni = mesh_pb2.NeighborInfo()
+            ni.ParseFromString(payload)
+        except Exception:
+            return
+        a = _nid(ni.node_id or frm)
+        now = time.time()
+        with self.mesh_lock:
+            d = self.neighbors.setdefault(a, {})
+            for nb in ni.neighbors:
+                d[_nid(nb.node_id)] = {"snr": nb.snr, "t": now}
+
+    def _snapshot_nodedb(self):
+        """Flatten the connected node's NodeDB into a compact list for the RF view."""
+        nodes = getattr(self.iface, "nodes", None) or {}
+        out = []
+        for _key, n in list(nodes.items()):
+            u = n.get("user") or {}
+            dm = n.get("deviceMetrics") or {}
+            nid = u.get("id") or _nid(n.get("num"))
+            out.append({
+                "id": nid, "short": u.get("shortName"), "long": u.get("longName"),
+                "role": u.get("role"), "hw": u.get("hwModel"),
+                "snr": n.get("snr"), "hops": n.get("hopsAway"),
+                "batt": dm.get("batteryLevel"), "volt": dm.get("voltage"),
+                "airtx": dm.get("airUtilTx"), "chutil": dm.get("channelUtilization"),
+                "last": n.get("lastHeard"), "viaMqtt": n.get("viaMqtt", False),
+                "self": nid == self.node,
+            })
+        return out
+
+    def _publish_mesh(self):
+        nodes = self._snapshot_nodedb()
+        with self.mesh_lock:
+            links = [{"a": a, "b": b, "snr": v["snr"], "t": v["t"]}
+                     for a, bs in self.neighbors.items() for b, v in bs.items()]
+        self.cli.publish("siliqs/mesh/nodes",
+                         json.dumps({"gw": self.node, "t": time.time(), "nodes": nodes}),
+                         retain=True)
+        self.cli.publish("siliqs/mesh/neighbors",
+                         json.dumps({"t": time.time(), "links": links}), retain=True)
+
+    def _nodedb_loop(self):
+        while True:
+            try:
+                self._publish_mesh()
+            except Exception as e:  # noqa: BLE001
+                if self.verbose:
+                    print(f"  [mesh] nodedb publish failed: {e}", file=sys.stderr)
+            time.sleep(self.nodedb_interval)
+
+    def _on_mesh_cmd(self, msg):
+        try:
+            m = json.loads(msg.payload.decode())
+        except Exception:
+            return
+        cmd = m.get("cmd")
+        if cmd == "traceroute":
+            self._do_traceroute(m.get("to"))
+        elif cmd == "neighborinfo":
+            self._set_neighborinfo(bool(m.get("enable")), m.get("interval"))
+        elif cmd == "refresh":
+            try:
+                self._publish_mesh()
+            except Exception:
+                pass
+
+    def _trace_publish(self, obj):
+        self.cli.publish("siliqs/mesh/trace", json.dumps(obj))
+
+    def _do_traceroute(self, to):
+        if not to:
+            return
+        from meshtastic import mesh_pb2, portnums_pb2
+
+        def on_resp(packet):
+            self._on_traceroute_resp(to, packet)
+
+        try:
+            rd = mesh_pb2.RouteDiscovery()
+            self.iface.sendData(rd.SerializeToString(), destinationId=to,
+                                portNum=portnums_pb2.PortNum.TRACEROUTE_APP,
+                                wantResponse=True, onResponse=on_resp, hopLimit=7)
+            self._trace_publish({"to": to, "t": time.time(), "state": "sent"})
+        except Exception as e:  # noqa: BLE001
+            self._trace_publish({"to": to, "t": time.time(), "ok": False, "err": str(e)})
+
+    def _on_traceroute_resp(self, to, packet):
+        res = {"to": to, "t": time.time(), "ok": True,
+               "from": packet.get("fromId") or _nid(packet.get("from", 0))}
+        try:
+            from meshtastic import mesh_pb2
+            rd = mesh_pb2.RouteDiscovery()
+            rd.ParseFromString((packet.get("decoded") or {}).get("payload") or b"")
+            scale = lambda s: (s / 4.0 if s != -128 else None)   # noqa: E731  INT8_MIN = no reading
+            res["route"] = [_nid(x) for x in rd.route]
+            res["snrTowards"] = [scale(s) for s in rd.snr_towards]
+            res["routeBack"] = [_nid(x) for x in rd.route_back]
+            res["snrBack"] = [scale(s) for s in rd.snr_back]
+        except Exception as e:  # noqa: BLE001
+            res["ok"] = False
+            res["err"] = str(e)
+        self._trace_publish(res)
+
+    def _set_neighborinfo(self, enable, interval=None):
+        """Enable/disable the NeighborInfo module on the CONNECTED (gateway) node only.
+        Remote nodes would each need the same — that's a separate admin step."""
+        try:
+            node = self.iface.localNode
+            node.moduleConfig.neighbor_info.enabled = bool(enable)
+            if interval:
+                node.moduleConfig.neighbor_info.update_interval = int(interval)
+            node.writeConfig("neighbor_info")
+            self._trace_publish({"cmd": "neighborinfo", "ok": True,
+                                 "enabled": bool(enable), "t": time.time(),
+                                 "note": "applied to the gateway node only"})
+        except Exception as e:  # noqa: BLE001
+            self._trace_publish({"cmd": "neighborinfo", "ok": False,
+                                 "err": str(e), "t": time.time()})
 
     def _start_web(self, port):
         import threading
