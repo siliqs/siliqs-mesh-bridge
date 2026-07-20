@@ -661,11 +661,13 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
      <th data-en="Role" data-zh="角色">Role</th>
      <th data-en="Hops" data-zh="跳數">Hops</th>
      <th>SNR</th>
+     <th>RSSI</th>
+     <th data-en="Rx" data-zh="收到數">Rx</th>
      <th data-en="Batt" data-zh="電量">Batt</th>
-     <th data-en="Air-util" data-zh="空中使用">Air-util</th>
-     <th data-en="Heard" data-zh="上次">Heard</th>
+     <th data-en="First seen" data-zh="首次發現">First seen</th>
+     <th data-en="Last heard" data-zh="上次聽到">Last heard</th>
     </tr></thead>
-    <tbody id="meshRows"><tr><td colspan="7" class="note" data-en="no node data yet — start the gateway; the RF map builds as nodes are heard" data-zh="尚無節點資料 — 啟動閘道,聽到節點後就會建圖">no node data yet</td></tr></tbody>
+    <tbody id="meshRows"><tr><td colspan="9" class="note" data-en="no node data yet — start the gateway; the RF map builds as nodes are heard" data-zh="尚無節點資料 — 啟動閘道,聽到節點後就會建圖">no node data yet</td></tr></tbody>
    </table>
   </div>
  </main>
@@ -850,7 +852,10 @@ function drawMeshGraph(){
   const stale=n.last&&(now-n.last>MESH_STALE), r=isgw?22:17;
   const fill=isgw?'#243b52':(stale?'#3a2226':'#1d1f27'), stroke=isgw?'#3fa7d6':(stale?'#ef6d6d':'#3a4152');
   const lbl=esc(n.short||idTail(n.id)), sub=isgw?'GW':('!'+idTail(n.id));
-  const hopTxt=(!isgw&&n.hops!=null)?`<text x="${x}" y="${y+r+22}" font-size="9" fill="#9aa0ad" text-anchor="middle">${n.hops}h${n.snr!=null?' · '+n.snr.toFixed(0)+'dB':''}</text>`:'';
+  const hlabel=(!isgw&&n.hops!=null)?(LANG==='zh'?`${n.hops} 跳`:`${n.hops} hop${n.hops===1?'':'s'}`):'';
+  const slabel=(!isgw&&n.snr!=null)?`SNR ${n.snr.toFixed(0)}`:'';
+  const sub2=[hlabel,slabel].filter(Boolean).join(' · ');
+  const hopTxt=sub2?`<text x="${x}" y="${y+r+22}" font-size="9" fill="#9aa0ad" text-anchor="middle">${sub2}</text>`:'';
   return `<circle cx="${x}" cy="${y}" r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="2"/>`
     +`<text x="${x}" y="${y-1}" font-size="10" font-weight="700" fill="#e7e9ee" text-anchor="middle">${lbl}</text>`
     +`<text x="${x}" y="${y+10}" font-size="8" fill="#9aa0ad" text-anchor="middle">${sub}</text>`+hopTxt;
@@ -888,11 +893,14 @@ function renderMeshTable(){
   const hopTxt=n.self?'—':(n.hops!=null?n.hops:'?');
   const role=(n.role||'').replace('CLIENT_','').replace('_',' ')||(n.self?'GATEWAY':'—');
   const batt=n.batt!=null&&n.batt<=100?n.batt+'%':(n.batt===101?'⚡':'—');
-  const air=n.airtx!=null?n.airtx.toFixed(1)+'%':'—';
+  const rssi=n.rssi!=null?n.rssi+' dBm':'—';
+  const rx=n.count!=null&&n.count>0?n.count:'—';
+  const first=n.first?new Date(n.first*1000).toLocaleTimeString():'—';
   return `<tr class="${stale?'stale':''}"><td class="node mono">${n.self?'★ ':''}${(n.short?n.short+' ':'')}<span class="note">!${idTail(n.id)}</span></td>`
    +`<td class="note">${role}</td><td class="${hopCls}">${hopTxt}</td>`
-   +`<td><span class="chip ${sc.c}">${sc.t}</span></td><td class="note">${batt}</td><td class="note">${air}</td>`
-   +`<td class="note">${n.last?ago(n.last):'—'}</td></tr>`;
+   +`<td><span class="chip ${sc.c}">${sc.t}</span></td><td class="note">${rssi}</td>`
+   +`<td class="note">${rx}</td><td class="note">${batt}</td>`
+   +`<td class="note">${first}</td><td class="note">${n.last?ago(n.last):'—'}</td></tr>`;
  }).join('');
 }
 function fillTraceSel(){

@@ -231,9 +231,16 @@ class MeshMqttBridge:
         hs, hl = packet.get("hopStart"), packet.get("hopLimit")
         hops = (hs - hl) if isinstance(hs, int) and isinstance(hl, int) else None
         if sender:
+            now = time.time()
             with self.mesh_lock:
-                self.heard[sender] = {"last": time.time(), "snr": packet.get("rxSnr"),
-                                      "rssi": packet.get("rxRssi"), "hops": hops}
+                rec = self.heard.get(sender)
+                if rec is None:
+                    rec = self.heard[sender] = {"first": now, "count": 0}
+                rec["last"] = now
+                rec["snr"] = packet.get("rxSnr")
+                rec["rssi"] = packet.get("rxRssi")
+                rec["hops"] = hops
+                rec["count"] += 1
         # normalise the portnum to an int where we can (named private ports come as a name)
         pn_int = MODBUS_PORTNUM if pn in (MODBUS_PORTNUM, str(MODBUS_PORTNUM), "PRIVATE_APP") \
             else (int(pn) if isinstance(pn, int) or (isinstance(pn, str) and pn.isdigit()) else pn)
@@ -331,7 +338,7 @@ class MeshMqttBridge:
                 "batt": dm.get("batteryLevel"), "volt": dm.get("voltage"),
                 "airtx": dm.get("airUtilTx"), "chutil": dm.get("channelUtilization"),
                 "last": n.get("lastHeard"), "viaMqtt": n.get("viaMqtt", False),
-                "self": nid == self.node,
+                "first": None, "count": 0, "self": nid == self.node,
             }
             h = heard.get(nid)
             if h:                                      # live packet data wins on freshness…
@@ -339,6 +346,8 @@ class MeshMqttBridge:
                 if h.get("snr") is not None:
                     e["snr"] = h["snr"]
                 e["rssi"] = h.get("rssi")
+                e["first"] = h.get("first")
+                e["count"] = h.get("count", 0)
                 if e["hops"] is None and h.get("hops") is not None:
                     e["hops"] = h["hops"]              # …but keep NodeDB hopsAway (stable min-hops)
                     #                                     over a single packet's flood-path hop count
@@ -351,7 +360,8 @@ class MeshMqttBridge:
             out.append({"id": nid, "short": None, "long": None, "role": None, "hw": None,
                         "snr": h.get("snr"), "rssi": h.get("rssi"), "hops": h.get("hops"),
                         "batt": None, "volt": None, "airtx": None, "chutil": None,
-                        "last": h.get("last"), "viaMqtt": False, "self": nid == self.node})
+                        "last": h.get("last"), "first": h.get("first"), "count": h.get("count", 0),
+                        "viaMqtt": False, "self": nid == self.node})
         return out
 
     def _publish_mesh(self):
