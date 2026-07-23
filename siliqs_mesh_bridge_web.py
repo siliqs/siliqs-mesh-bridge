@@ -265,12 +265,20 @@ class Runner:
         return True, "started"
 
     def _pump(self):
+        # Every line goes two places: the ring the control panel shows, and this
+        # process's own stdout. A headless deployment (docker logs, journalctl) can
+        # read nothing but stdout — without the echo, a gateway that fails to open
+        # its port and exits looks "started" there forever.
+        def emit(line):
+            self.log.append(line)
+            print(line, flush=True)
+
         try:
             for line in self.proc.stdout:
-                self.log.append(line.rstrip("\n"))
+                emit(line.rstrip("\n"))
         except Exception:
             pass
-        self.log.append("— gateway process exited —")
+        emit("— gateway process exited —")
 
     def stop(self):
         with self.lock:
