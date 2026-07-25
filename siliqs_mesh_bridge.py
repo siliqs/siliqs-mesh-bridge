@@ -58,7 +58,22 @@ MODBUS_PORTNUM = 256   # PRIVATE_APP — where the SQC485I Modbus telemetry arri
 SENSOR_PORTNUM = 258   # SQS-Sensor line (SQS-TH-I …) fixed T/H payload — unnamed private port
 SERIAL_PORTNUM = 260   # the serial-over-MQTT client uses this (unnamed private port)
 
+from sqc485i_payload import (  # noqa: E402
+    Sqc485iPayloadError,
+    decode_raw_forward,
+    parse_config_blob,
+)
 from sqs_sensor_payload import SqsPayloadError, decode_sqs_th  # noqa: E402
+
+# An SQC485I uplink is a raw forward — concatenated Modbus replies with no
+# lengths — so it cannot be sliced without the node's poll plan. The node will
+# hand it over on request ('SQG?' → 'SQG' + config blob), so the bridge asks the
+# first time it sees a node and caches the answer. Until then the raw bytes go
+# out exactly as they always did.
+SQ_GET_CONFIG_REQUEST = b"SQG?"
+SQ_GET_CONFIG_REPLY = b"SQG"
+SQ_MARKER = b"SQ"  # every command/reply starts with it; telemetry never does
+SQ_PLAN_RETRY_S = 300  # don't badger a node that will not answer
 
 
 # ── south side: open the node connection ──────────────────────────────────────
@@ -190,6 +205,10 @@ class MeshMqttBridge:
         self.lock = threading.Lock()
         self.latest = {}
         self.events = deque(maxlen=200)
+        # SQC485I poll plans, learned from each node via 'SQG?'. node id -> plan,
+        # plus when we last asked, so an unanswering node is retried but not spammed.
+        self.sq_plans = {}
+        self.sq_plan_asked = {}
         # ── mesh / RF insight state (NodeDB + neighbor graph + traceroute) ──────
         self.cmd_topic = "siliqs/mesh/cmd"            # panel → bridge control channel
         self.mesh_lock = threading.Lock()
@@ -229,6 +248,7 @@ class MeshMqttBridge:
         print(f"  uplink   256 → msh/2/json/{self.channel}/<sender>   "
               f"e.g. msh/2/json/{self.channel}/!7d51bdc4")
         print(f"  uplink   any → {self.rx_prefix}/<portnum>   e.g. {self.rx_prefix}/256")
+        print(f"  uplink   256 → siliqs/modbus/<sender>   (decoded, once the node's plan is known)")
         print(f"  downlink     ← {self.tx_topic}   {{to,portnum,data(b64)}}")
         if self.web_port:
             print(f"  telemetry view: http://0.0.0.0:{self.web_port}")
@@ -283,6 +303,15 @@ class MeshMqttBridge:
 
         # 256 telemetry — also emit the nafco-compatible JSON + record for the web view
         if pn_int == MODBUS_PORTNUM:
+            # Commands and their replies share this portnum with telemetry. They
+            # are told apart by content: everything in the SQ command set starts
+            # 'SQ', and a Modbus reply never can — slave 0x53 with function 0x51
+            # is not a legal frame.
+            if payload.startswith(SQ_MARKER):
+                if payload.startswith(SQ_GET_CONFIG_REPLY) and len(payload) > 3:
+                    self._ingest_sq_plan(sender, payload[3:])
+                return  # not telemetry; nothing further to publish
+
             envelope = {
                 "portnum": "PRIVATE_APP",
                 "payload": {"raw": base64.b64encode(payload).decode()},
@@ -292,6 +321,14 @@ class MeshMqttBridge:
             }
             self.cli.publish(f"msh/2/json/{self.channel}/{sender}", json.dumps(envelope))
             ev = {"t": time.time(), "node": sender, "len": len(payload), "hex": payload.hex()}
+
+            # Decode to engineering values when the node's plan is known, and ask
+            # for it when it is not. Raw base64 above is unchanged either way, so
+            # anything already consuming it keeps working.
+            reading = self._decode_sq_payload(sender, frm, payload, packet)
+            if reading:
+                ev["reading"] = reading
+
             with self.lock:
                 self.latest[sender] = ev
                 self.events.append(ev)
@@ -321,6 +358,67 @@ class MeshMqttBridge:
         if self.verbose:
             print(f"  [up {self.n_up}] {sender} pn={pn_int} {len(payload)}B "
                   f"-> {self.rx_prefix}/{pn_int}", file=sys.stderr)
+
+    # ── SQC485I (256): learn each node's poll plan, then decode its uplinks ────
+
+    def _ingest_sq_plan(self, sender, blob):
+        """Cache the poll plan a node returned in answer to 'SQG?'."""
+        try:
+            plan = parse_config_blob(blob)
+        except Sqc485iPayloadError as exc:
+            print(f"  {sender}: bad config blob ({exc})", file=sys.stderr)
+            return
+        with self.lock:
+            self.sq_plans[sender] = plan
+        print(f"  {sender}: poll plan learned — {len(plan['polls'])} poll(s), "
+              f"{plan['baud']} baud, device {plan['device_name']!r}", file=sys.stderr)
+
+    def _request_sq_plan(self, sender):
+        """Ask a node for its poll plan, at most once every SQ_PLAN_RETRY_S."""
+        now = time.time()
+        if now - self.sq_plan_asked.get(sender, 0) < SQ_PLAN_RETRY_S:
+            return
+        self.sq_plan_asked[sender] = now
+        try:
+            self.iface.sendData(SQ_GET_CONFIG_REQUEST, destinationId=sender,
+                                portNum=MODBUS_PORTNUM, wantAck=False)
+            if self.verbose:
+                print(f"  {sender}: asking for its poll plan (SQG?)", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            print(f"  {sender}: could not ask for poll plan: {e}", file=sys.stderr)
+
+    def _decode_sq_payload(self, sender, frm, payload, packet):
+        """Decode a raw forward and publish it on siliqs/modbus/<node>.
+
+        Returns the decoded dict, or None when the node's plan is not known yet —
+        a raw forward carries no lengths, so without the plan there is nothing to
+        slice it by.
+        """
+        with self.lock:
+            plan = self.sq_plans.get(sender)
+        if not plan:
+            self._request_sq_plan(sender)
+            return None
+
+        decoded = decode_raw_forward(payload, plan["polls"])
+        decoded.update({
+            "node": sender, "fromNum": frm,
+            "device_name": plan["device_name"],
+            "channel": packet.get("channel", 0),
+            "rssi": packet.get("rxRssi"), "snr": packet.get("rxSnr"),
+            "t": packet.get("rxTime", 0) or int(time.time()),
+        })
+        self.cli.publish(f"siliqs/modbus/{sender}", json.dumps(decoded))
+
+        # A plan that no longer fits what the node sends means it was reconfigured
+        # behind our back; re-ask rather than mis-slicing every future uplink.
+        if decoded["bytes"] != decoded["expected_bytes"]:
+            print(f"  {sender}: payload is {decoded['bytes']}B but the cached plan "
+                  f"predicts {decoded['expected_bytes']}B — re-reading the plan", file=sys.stderr)
+            with self.lock:
+                self.sq_plans.pop(sender, None)
+            self.sq_plan_asked.pop(sender, None)
+        return decoded
 
     # downlink: MQTT → mesh
     def _on_mqtt_tx(self, client, userdata, msg):  # noqa: ARG002
