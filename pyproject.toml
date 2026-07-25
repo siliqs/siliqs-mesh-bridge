@@ -31,4 +31,4 @@ siliqs-serial-mqtt = "siliqs_serial_mqtt:main"           # serial-over-MQTT clie
 siliqs-mqtt-broker = "siliqs_mqtt_broker:main"           # tiny built-in MQTT broker (no external broker needed)
 
 [tool.setuptools]
-py-modules = ["siliqs_mesh_bridge", "siliqs_mesh_bridge_web", "siliqs_serial_mqtt", "siliqs_mqtt_broker", "app"]
+py-modules = ["siliqs_mesh_bridge", "siliqs_mesh_bridge_web", "siliqs_serial_mqtt", "siliqs_mqtt_broker", "sqs_sensor_payload", "app"]

@@ -55,7 +55,10 @@ from collections import deque
 from pubsub import pub
 
 MODBUS_PORTNUM = 256   # PRIVATE_APP — where the SQC485I Modbus telemetry arrives
+SENSOR_PORTNUM = 258   # SQS-Sensor line (SQS-TH-I …) fixed T/H payload — unnamed private port
 SERIAL_PORTNUM = 260   # the serial-over-MQTT client uses this (unnamed private port)
+
+from sqs_sensor_payload import SqsPayloadError, decode_sqs_th  # noqa: E402
 
 
 # ── south side: open the node connection ──────────────────────────────────────
@@ -292,6 +295,29 @@ class MeshMqttBridge:
             with self.lock:
                 self.latest[sender] = ev
                 self.events.append(ev)
+
+        # 258 SQS-Sensor line — decode the fixed T/H payload to engineering values and
+        # publish clean JSON on siliqs/sensor/<node> (Grafana/Node-RED friendly). The raw
+        # base64 also still went out on siliqs/rx/<gw>/258 above.
+        if pn_int == SENSOR_PORTNUM:
+            try:
+                reading = decode_sqs_th(payload)
+            except SqsPayloadError as exc:
+                if self.verbose:
+                    print(f"  [up {self.n_up}] {sender} pn=258 bad SQS payload: {exc}", file=sys.stderr)
+            else:
+                reading.update({
+                    "node": sender, "fromNum": frm,
+                    "channel": packet.get("channel", 0),
+                    "rssi": packet.get("rxRssi"), "snr": packet.get("rxSnr"),
+                    "t": packet.get("rxTime", 0) or int(time.time()),
+                })
+                self.cli.publish(f"siliqs/sensor/{sender}", json.dumps(reading))
+                ev = {"t": time.time(), "node": sender, "len": len(payload),
+                      "hex": payload.hex(), "reading": reading}
+                with self.lock:
+                    self.latest[sender] = ev
+                    self.events.append(ev)
         if self.verbose:
             print(f"  [up {self.n_up}] {sender} pn={pn_int} {len(payload)}B "
                   f"-> {self.rx_prefix}/{pn_int}", file=sys.stderr)
