@@ -205,6 +205,10 @@ class Monitor:
 
 
 def main():
+    # Same cp950-crash fix as siliqs_mesh_bridge.py — see its main() for the story.
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(errors="backslashreplace")
     ap = argparse.ArgumentParser(description="Per-node packet-miss monitor for the Siliqs gateway.")
     ap.add_argument("--host", default="127.0.0.1", help="MQTT broker host (default 127.0.0.1)")
     ap.add_argument("--port", type=int, default=1883, help="MQTT broker port (default 1883)")

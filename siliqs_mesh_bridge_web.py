@@ -1000,6 +1000,10 @@ pollMesh();setInterval(pollMesh,4000);
 
 
 def main():
+    # Same cp950-crash fix as siliqs_mesh_bridge.py — see its main() for the story.
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(errors="backslashreplace")
     ap = argparse.ArgumentParser(description="Local control panel for the Siliqs Gateway.")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)

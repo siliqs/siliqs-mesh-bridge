@@ -77,6 +77,13 @@ def _run_panel():
 
 
 def main():
+    # Windows consoles default stdout/stderr to the legacy codepage (e.g. cp950), which
+    # can't encode the ⇄/●/— etc. this app (and the bridge/panel it hands off to) print —
+    # that crashed the whole frozen exe in the field. Fix it once here: both the panel
+    # path and the --sq-run-bridge re-exec path start from this main().
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(errors="backslashreplace")
     if len(sys.argv) > 1 and sys.argv[1] == "--sq-run-bridge":
         _run_bridge()
     else:

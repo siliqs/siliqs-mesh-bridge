@@ -640,6 +640,11 @@ poll();setInterval(poll,2000);
 
 
 def main():
+    # Windows consoles default stdout/stderr to the legacy codepage (e.g. cp950), which
+    # can't encode the ⇄/●/— etc. we print — that crashed the whole process in the field.
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(errors="backslashreplace")
     ap = argparse.ArgumentParser(description="Siliqs Gateway — a bidirectional mesh ⇄ MQTT bridge.")
     ap.add_argument("--iface", choices=["usb", "ble"], default="usb", help="south-side transport")
     ap.add_argument("--port", help="USB devPath, e.g. /dev/ttyACM0 or /dev/cu.usbmodemXXX")

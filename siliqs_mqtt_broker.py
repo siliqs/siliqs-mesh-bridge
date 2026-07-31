@@ -20,6 +20,7 @@ Standalone:  siliqs-mqtt-broker --host 0.0.0.0 --port 1883
 """
 import argparse
 import socket
+import sys
 import threading
 
 # MQTT control packet types (high nibble of byte 1)
@@ -229,6 +230,10 @@ class MqttBroker:
 
 
 def main():
+    # Same cp950-crash fix as siliqs_mesh_bridge.py — see its main() for the story.
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(errors="backslashreplace")
     ap = argparse.ArgumentParser(description="Tiny built-in MQTT broker for the Siliqs Gateway.")
     ap.add_argument("--host", default="0.0.0.0", help="bind address (0.0.0.0 = reachable on the LAN)")
     ap.add_argument("--port", type=int, default=1883)
