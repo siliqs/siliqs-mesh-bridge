@@ -67,9 +67,15 @@ def lan_ip():
         return ip
     except Exception:
         return "127.0.0.1"
-# If set, the last applied config is saved here and auto-started on launch — so a
-# deployed appliance survives a reboot without anyone clicking Start.
-CONFIG_FILE = os.environ.get("SMB_CONFIG_FILE")
+# The last applied config is saved here and auto-started on launch — so a deployed
+# appliance (or just a user's laptop) survives a restart without anyone clicking Start.
+# Defaults to the same per-user state dir siliqs_mesh_bridge already uses for heard.json;
+# SMB_CONFIG_FILE still overrides it for headless/systemd setups that want a fixed path.
+# Until this default existed, nothing in app.py / the PyInstaller .spec / the Dockerfile
+# ever set SMB_CONFIG_FILE, so _save_cfg()/_load_cfg() were silent no-ops in every shipped
+# build and auto-start never actually ran — see QC's 1.3.7 field report (E2).
+CONFIG_FILE = os.environ.get("SMB_CONFIG_FILE") or os.path.join(
+    siliqs_mesh_bridge._state_dir(), "panel_config.json")
 
 
 class Telemetry:
@@ -182,6 +188,7 @@ telemetry = Telemetry()
 def _save_cfg(cfg):
     if CONFIG_FILE:
         try:
+            os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
             with open(CONFIG_FILE, "w") as f:
                 json.dump(cfg, f)
         except OSError:
